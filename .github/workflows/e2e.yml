@@ -1,0 +1,67 @@
+name: E2E
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  playwright:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create runtime env file
+        run: cp .env.example .env
+
+      - name: Start WordPress stack
+        run: docker compose up -d --build
+
+      - name: Wait for WordPress
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8080 >/dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          docker compose ps
+          docker compose logs
+          exit 1
+
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        env:
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:8080
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report
+            test-results
+
+      - name: Print Docker logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop WordPress stack
+        if: always()
+        run: docker compose down -v
