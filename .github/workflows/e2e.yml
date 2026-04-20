@@ -47,6 +47,8 @@ jobs:
       - name: Run Playwright tests
         env:
           PLAYWRIGHT_BASE_URL: http://127.0.0.1:8080
+          WORDPRESS_ADMIN_USER: admin
+          WORDPRESS_ADMIN_PASSWORD: changeme123
         run: npm run test:e2e
 
       - name: Upload Playwright report

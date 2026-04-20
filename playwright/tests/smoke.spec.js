@@ -1,7 +1,32 @@
 const { test, expect } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
 
-const adminUser = process.env.WORDPRESS_ADMIN_USER || 'admin';
-const adminPassword = process.env.WORDPRESS_ADMIN_PASSWORD || 'changeme123';
+function readEnvFile() {
+  const envPath = path.resolve(process.cwd(), '.env');
+
+  if (!fs.existsSync(envPath)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    fs
+      .readFileSync(envPath, 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#') && line.includes('='))
+      .map((line) => {
+        const separatorIndex = line.indexOf('=');
+        const key = line.slice(0, separatorIndex).trim();
+        const value = line.slice(separatorIndex + 1).trim();
+        return [key, value];
+      })
+  );
+}
+
+const envFile = readEnvFile();
+const adminUser = process.env.WORDPRESS_ADMIN_USER || envFile.WORDPRESS_ADMIN_USER || 'admin';
+const adminPassword = process.env.WORDPRESS_ADMIN_PASSWORD || envFile.WORDPRESS_ADMIN_PASSWORD || 'changeme123';
 
 async function loginToWpAdmin(page) {
   await page.goto('/wp-login.php');
