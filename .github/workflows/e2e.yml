@@ -29,7 +29,7 @@ jobs:
       - name: Wait for WordPress
         run: |
           for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:8080 >/dev/null; then
+            if curl -fsS http://localhost:8080 >/dev/null; then
               exit 0
             fi
             sleep 10
@@ -46,7 +46,7 @@ jobs:
 
       - name: Run Playwright tests
         env:
-          PLAYWRIGHT_BASE_URL: http://127.0.0.1:8080
+          PLAYWRIGHT_BASE_URL: http://localhost:8080
           WORDPRESS_ADMIN_USER: admin
           WORDPRESS_ADMIN_PASSWORD: changeme123
         run: npm run test:e2e

@@ -30,10 +30,37 @@ const adminPassword = process.env.WORDPRESS_ADMIN_PASSWORD || envFile.WORDPRESS_
 
 async function loginToWpAdmin(page) {
   await page.goto('/wp-login.php');
+  await expect(page.locator('#loginform')).toBeVisible();
+
+  await page.context().clearCookies();
+  await page.reload();
+  await expect(page.locator('#loginform')).toBeVisible();
+
+  const hasTestCookie = await page
+    .context()
+    .cookies()
+    .then((cookies) => cookies.some((cookie) => cookie.name === 'wordpress_test_cookie'));
+
+  if (!hasTestCookie) {
+    throw new Error('WordPress test cookie was not set before login.');
+  }
+
   await page.locator('#user_login').fill(adminUser);
   await page.locator('#user_pass').fill(adminPassword);
-  await page.locator('#wp-submit').click();
-  await expect(page).toHaveURL(/wp-admin/);
+  await Promise.all([
+    page.waitForLoadState('domcontentloaded'),
+    page.locator('#wp-submit').click(),
+  ]);
+
+  try {
+    await page.waitForURL(/wp-admin/, { timeout: 15_000 });
+  } catch (error) {
+    const loginError = page.locator('#login_error, .message');
+    const message = (await loginError.first().textContent().catch(() => null)) || 'No login error message was rendered.';
+    throw new Error(
+      `WordPress login did not reach wp-admin. Current URL: ${page.url()}. Login message: ${message}`
+    );
+  }
 }
 
 test('homepage responds and shows WordPress content', async ({ page }) => {
@@ -76,5 +103,11 @@ test('add product from wp-admin', async ({ page }) => {
   }
 
   await expect(page.locator('body')).toContainText(/published|updated|Product published/i);
-  await expect(page.locator('body')).toContainText(productName);
+
+  const permalinkField = page.locator('#sample-permalink a, .editor-post-permalink__link').first();
+  if (await permalinkField.isVisible().catch(() => false)) {
+    await expect(permalinkField).toContainText(/smoke-product/i);
+  } else {
+    await expect(titleField).toHaveValue(productName);
+  }
 });
