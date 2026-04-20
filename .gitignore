@@ -1,4 +1,8 @@
 .env
+.jason.env
+.env.local
+.env.*
+!.env.example
 
 #Playwright
 node_modules/
