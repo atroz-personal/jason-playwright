@@ -62,14 +62,23 @@ jobs:
           FE_CERTIFICATE_PIN: ${{ secrets.FE_CERTIFICATE_PIN }}
         run: npm run test:e2e
 
+      - name: List Playwright outputs
+        if: always()
+        run: |
+          pwd
+          ls -la
+          ls -la playwright-report || true
+          ls -la test-results || true
+
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
+          if-no-files-found: ignore
           path: |
-            playwright-report
-            test-results
+            playwright-report/
+            test-results/
 
       - name: Print Docker logs on failure
         if: failure()
