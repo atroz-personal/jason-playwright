@@ -45,9 +45,9 @@ jobs:
         run: npx playwright install --with-deps chromium firefox webkit
 
       - name: Create FE certificate file
-        if: ${{ secrets.FE_CERTIFICATE_P12_B64 != '' }}
         env:
           FE_CERTIFICATE_P12_B64: ${{ secrets.FE_CERTIFICATE_P12_B64 }}
+        if: ${{ env.FE_CERTIFICATE_P12_B64 != '' }}
         run: |
           echo "$FE_CERTIFICATE_P12_B64" | base64 --decode > /tmp/fe-certificate.p12
 
