@@ -51,6 +51,21 @@ jobs:
         run: |
           echo "$FE_CERTIFICATE_P12_B64" | base64 --decode > /tmp/fe-certificate.p12
 
+      - name: Create FE plugin zip
+        env:
+          FE_PLUGIN_ZIP_B64: ${{ secrets.FE_PLUGIN_ZIP_B64 }}
+        if: ${{ env.FE_PLUGIN_ZIP_B64 != '' }}
+        run: |
+          echo "$FE_PLUGIN_ZIP_B64" | base64 --decode > /tmp/factura-electronica.zip
+
+      - name: Install FE plugin
+        env:
+          FE_PLUGIN_ZIP_B64: ${{ secrets.FE_PLUGIN_ZIP_B64 }}
+        if: ${{ env.FE_PLUGIN_ZIP_B64 != '' }}
+        run: |
+          docker cp /tmp/factura-electronica.zip wp-app:/tmp/factura-electronica.zip
+          docker exec wp-app wp plugin install /tmp/factura-electronica.zip --activate --force --allow-root --path=/var/www/html
+
       - name: Run Playwright tests
         env:
           PLAYWRIGHT_BASE_URL: http://localhost:8080
