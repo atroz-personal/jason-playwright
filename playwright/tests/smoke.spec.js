@@ -128,7 +128,7 @@ test('add product from wp-admin', async ({ page }) => {
   }
 });
 
-test('add factura electronica emisor from WooCommerce settings', async ({ page }) => {
+test('add factura electronica emisor from WooCommerce settings', async ({ page }, testInfo) => {
   test.skip(
     !feApiUser || !feApiPassword || !feCertificatePath || !feCertificatePin,
     'Factura Electronica test requires FE_API_USERNAME, FE_API_PASSWORD, FE_CERTIFICATE_PATH, and FE_CERTIFICATE_PIN.'
@@ -186,4 +186,19 @@ test('add factura electronica emisor from WooCommerce settings', async ({ page }
   await expect(page.locator('body')).toContainText(emisorName);
   await expect(page.locator('body')).toContainText(emisorId);
   await expect(page.locator('body')).toContainText(actividadEconomica);
+
+  const emittersTable = page.locator('table').filter({ hasText: 'Gestión de Emisores' }).first();
+  const emittersTableFallback = page.locator('table').first();
+  const screenshotPath = testInfo.outputPath('fe-emitters-table.png');
+
+  if (await emittersTable.isVisible().catch(() => false)) {
+    await emittersTable.screenshot({ path: screenshotPath });
+  } else {
+    await emittersTableFallback.screenshot({ path: screenshotPath });
+  }
+
+  await testInfo.attach('fe-emitters-table', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
 });
