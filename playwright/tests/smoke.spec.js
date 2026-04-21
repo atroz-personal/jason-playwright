@@ -156,6 +156,12 @@ test('add factura electronica emisor from WooCommerce settings', async ({ page }
   await expect(page).toHaveURL(/page=wc-settings&tab=fe&fe_action=new_emisor/);
   await expect(page.locator('body')).toContainText(/Configuración FE|Agregar Nuevo Emisor/i);
 
+  const existingEmittersTable = page.locator('body');
+  const existingEmittersCount = await existingEmittersTable
+    .getByRole('link', { name: /Probar|Editar|Eliminar/i })
+    .count()
+    .catch(() => 0);
+
   await page.fill('#nombre_legal', emisorName);
   await page.fill('#cedula_juridica', emisorId);
   await page.fill('#nombre_comercial', emisorTradeName);
@@ -172,6 +178,10 @@ test('add factura electronica emisor from WooCommerce settings', async ({ page }
   await page.fill('#direccion', 'Direccion de prueba Playwright');
   await page.fill('#telefono', '22223333');
   await page.fill('#email', emisorEmail);
+
+  if (existingEmittersCount === 0 && !(await page.locator('#is_parent').isChecked())) {
+    await page.check('#is_parent');
+  }
 
   if (!(await page.locator('#active').isChecked())) {
     await page.check('#active');
