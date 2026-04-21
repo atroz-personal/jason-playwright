@@ -187,15 +187,9 @@ test('add factura electronica emisor from WooCommerce settings', async ({ page }
   await expect(page.locator('body')).toContainText(emisorId);
   await expect(page.locator('body')).toContainText(actividadEconomica);
 
-  const emittersTable = page.locator('table').filter({ hasText: 'Gestión de Emisores' }).first();
-  const emittersTableFallback = page.locator('table').first();
   const screenshotPath = testInfo.outputPath('fe-emitters-table.png');
 
-  if (await emittersTable.isVisible().catch(() => false)) {
-    await emittersTable.screenshot({ path: screenshotPath });
-  } else {
-    await emittersTableFallback.screenshot({ path: screenshotPath });
-  }
+  await page.screenshot({ path: screenshotPath, fullPage: true });
 
   await testInfo.attach('fe-emitters-table', {
     path: screenshotPath,
