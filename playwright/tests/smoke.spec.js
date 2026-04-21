@@ -27,6 +27,10 @@ function readEnvFile() {
 const envFile = readEnvFile();
 const adminUser = process.env.WORDPRESS_ADMIN_USER || envFile.WORDPRESS_ADMIN_USER || 'admin';
 const adminPassword = process.env.WORDPRESS_ADMIN_PASSWORD || envFile.WORDPRESS_ADMIN_PASSWORD || 'changeme123';
+const feApiUser = process.env.FE_API_USERNAME || envFile.FE_API_USERNAME || '';
+const feApiPassword = process.env.FE_API_PASSWORD || envFile.FE_API_PASSWORD || '';
+const feCertificatePath = process.env.FE_CERTIFICATE_PATH || envFile.FE_CERTIFICATE_PATH || '';
+const feCertificatePin = process.env.FE_CERTIFICATE_PIN || envFile.FE_CERTIFICATE_PIN || '';
 
 async function loginToWpAdmin(page) {
   await page.goto('/wp-login.php');
@@ -110,4 +114,55 @@ test('add product from wp-admin', async ({ page }) => {
   } else {
     await expect(titleField).toHaveValue(productName);
   }
+});
+
+test('add factura electronica emisor from WooCommerce settings', async ({ page }) => {
+  test.skip(
+    !feApiUser || !feApiPassword || !feCertificatePath || !feCertificatePin,
+    'Factura Electronica test requires FE_API_USERNAME, FE_API_PASSWORD, FE_CERTIFICATE_PATH, and FE_CERTIFICATE_PIN.'
+  );
+
+  const unique = Date.now();
+  const emisorName = `Emisor Playwright ${unique}`;
+  const emisorTradeName = `Comercial ${unique}`;
+  const emisorId = `3101${String(unique).slice(-6)}`;
+  const actividadEconomica = '1234.5';
+  const emisorEmail = `playwright+${unique}@example.com`;
+
+  await loginToWpAdmin(page);
+  await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe&fe_action=new_emisor');
+
+  await expect(page).toHaveURL(/page=wc-settings&tab=fe&fe_action=new_emisor/);
+  await expect(page.locator('body')).toContainText(/Configuración FE|Agregar Nuevo Emisor/i);
+
+  await page.fill('#nombre_legal', emisorName);
+  await page.fill('#cedula_juridica', emisorId);
+  await page.fill('#nombre_comercial', emisorTradeName);
+  await page.fill('#api_username', feApiUser);
+  await page.fill('#api_password', feApiPassword);
+  await page.setInputFiles('#certificate_file', feCertificatePath);
+  await page.fill('#certificate_pin', feCertificatePin);
+  await page.fill('#actividad_economica', actividadEconomica);
+  await expect(page.locator('#actividad_economica')).toHaveValue(/^\d{4}\.\d$/);
+  await page.fill('#codigo_provincia', '1');
+  await page.fill('#codigo_canton', '01');
+  await page.fill('#codigo_distrito', '01');
+  await page.fill('#codigo_barrio', '01');
+  await page.fill('#direccion', 'Direccion de prueba Playwright');
+  await page.fill('#telefono', '22223333');
+  await page.fill('#email', emisorEmail);
+
+  if (!(await page.locator('#active').isChecked())) {
+    await page.check('#active');
+  }
+
+  await Promise.all([
+    page.waitForURL(/page=wc-settings&tab=fe(?:&|$)/),
+    page.getByRole('button', { name: 'Guardar Emisor' }).click(),
+  ]);
+
+  await expect(page.locator('body')).toContainText(/Emisor creado correctamente\./i);
+  await expect(page.locator('body')).toContainText(emisorName);
+  await expect(page.locator('body')).toContainText(emisorId);
+  await expect(page.locator('body')).toContainText(actividadEconomica);
 });

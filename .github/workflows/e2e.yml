@@ -44,11 +44,22 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium firefox webkit
 
+      - name: Create FE certificate file
+        if: ${{ secrets.FE_CERTIFICATE_P12_B64 != '' }}
+        env:
+          FE_CERTIFICATE_P12_B64: ${{ secrets.FE_CERTIFICATE_P12_B64 }}
+        run: |
+          echo "$FE_CERTIFICATE_P12_B64" | base64 --decode > /tmp/fe-certificate.p12
+
       - name: Run Playwright tests
         env:
           PLAYWRIGHT_BASE_URL: http://localhost:8080
           WORDPRESS_ADMIN_USER: admin
           WORDPRESS_ADMIN_PASSWORD: changeme123
+          FE_API_USERNAME: ${{ secrets.FE_API_USERNAME }}
+          FE_API_PASSWORD: ${{ secrets.FE_API_PASSWORD }}
+          FE_CERTIFICATE_PATH: /tmp/fe-certificate.p12
+          FE_CERTIFICATE_PIN: ${{ secrets.FE_CERTIFICATE_PIN }}
         run: npm run test:e2e
 
       - name: Upload Playwright report
