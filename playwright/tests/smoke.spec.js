@@ -269,6 +269,7 @@ test('add non-default factura electronica emisor from WooCommerce settings', asy
 test('add completed order with factura electronica from wp-admin', async ({ page }, testInfo) => {
   const productName = await getExistingProductName(page);
   const unique = Date.now();
+  const cedulaFisica = '114440852';
 
   await gotoAdminPage(page, '/wp-admin/admin.php?page=wc-orders&action=new', /page=wc-orders&action=new/);
   await expect(page.locator('#order_status')).toBeVisible();
@@ -283,22 +284,12 @@ test('add completed order with factura electronica from wp-admin', async ({ page
     await requireFacturaCheckbox.check();
   }
 
-  await page.locator('#fe_woo_full_name').fill(`Cliente Playwright ${unique}`);
-
   const idTypeField = page.locator('#fe_woo_id_type');
   if (await idTypeField.isVisible().catch(() => false)) {
-    const options = await idTypeField.locator('option').evaluateAll((nodes) =>
-      nodes
-        .map((node) => ({ value: node.value, disabled: node.disabled }))
-        .filter((option) => option.value && !option.disabled)
-    );
-
-    if (options.length > 0) {
-      await idTypeField.selectOption(options[0].value);
-    }
+    await idTypeField.selectOption({ label: /Cédula Física/i });
   }
 
-  await page.locator('#fe_woo_id_number').fill(`123456${String(unique).slice(-3)}`);
+  await page.locator('#fe_woo_id_number').fill(cedulaFisica);
   await page.locator('#fe_woo_invoice_email').fill(`playwright-order-${unique}@example.com`);
   await page.locator('#fe_woo_phone').fill('22223333');
   await page.locator('#fe_woo_activity_code').fill('1234.5');
