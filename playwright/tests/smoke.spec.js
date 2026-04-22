@@ -413,11 +413,13 @@ test('execute factura electronica from order status box', async ({ page }, testI
   const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
   await expect(facturaStatusBox).toBeVisible();
   await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
-  await expect(facturaStatusBox).not.toContainText(/EN COLA|PROCESANDO/i);
-  await expect(facturaStatusBox).toContainText(/Documentos Generados:/i);
-  await expect(facturaStatusBox).toContainText(/PDF Factura/i);
-  await expect(facturaStatusBox).toContainText(/XML Factura/i);
-  await expect(facturaStatusBox).toContainText(/XML Mensaje Receptor/i);
+  await expect(facturaStatusBox).not.toContainText(/EN COLA/i);
+  await expect(facturaStatusBox).toContainText(/Clave:/i);
+  await expect(facturaStatusBox).toContainText(/Estado Local:/i);
+  await expect(facturaStatusBox).toContainText(/Enviada/i);
+  await expect(facturaStatusBox).toContainText(/Estado Hacienda:/i);
+  await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
+  await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
 
   const screenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
   await page.screenshot({ path: screenshotPath, fullPage: true });
