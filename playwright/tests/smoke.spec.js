@@ -322,6 +322,28 @@ async function createCompletedFacturaOrder(page) {
   return { productName: addedProductName };
 }
 
+async function waitForFacturaDocuments(page, facturaStatusBox, timeoutMs = 120000) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const boxText = await facturaStatusBox.textContent().catch(() => '');
+    const hasAllDocuments =
+      /PDF Factura/i.test(boxText || '') &&
+      /XML Factura/i.test(boxText || '') &&
+      /XML Mensaje Receptor/i.test(boxText || '');
+
+    if (hasAllDocuments) {
+      return true;
+    }
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(facturaStatusBox).toBeVisible();
+    await page.waitForTimeout(5000);
+  }
+
+  return false;
+}
+
 test('homepage responds and shows WordPress content', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveTitle(/Mi WordPress/i);
@@ -421,10 +443,28 @@ test('execute factura electronica from order status box', async ({ page }, testI
   await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
   await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
 
-  const screenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
-  await page.screenshot({ path: screenshotPath, fullPage: true });
+  const documentsReady = await waitForFacturaDocuments(page, facturaStatusBox);
+
+  if (documentsReady) {
+    await expect(facturaStatusBox).toContainText(/Documentos Generados:/i);
+    await expect(facturaStatusBox).toContainText(/PDF Factura/i);
+    await expect(facturaStatusBox).toContainText(/XML Factura/i);
+    await expect(facturaStatusBox).toContainText(/XML Mensaje Receptor/i);
+  }
+
+  await facturaStatusBox.scrollIntoViewIfNeeded();
+
+  const statusBoxScreenshotPath = testInfo.outputPath('wc-order-execute-status-box.png');
+  await facturaStatusBox.screenshot({ path: statusBoxScreenshotPath });
+  await testInfo.attach('wc-order-execute-status-box', {
+    path: statusBoxScreenshotPath,
+    contentType: 'image/png',
+  });
+
+  const fullPageScreenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
+  await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
   await testInfo.attach('wc-order-execute-full-page', {
-    path: screenshotPath,
+    path: fullPageScreenshotPath,
     contentType: 'image/png',
   });
 });
