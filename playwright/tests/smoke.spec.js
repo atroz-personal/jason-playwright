@@ -81,6 +81,89 @@ async function gotoAdminPage(page, adminPath, readyPattern) {
   await expect(page).toHaveURL(readyPattern);
 }
 
+async function createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault }) {
+  test.skip(
+    !feApiUser || !feApiPassword || !feCertificatePath || !feCertificatePin,
+    'Factura Electronica test requires FE_API_USERNAME, FE_API_PASSWORD, FE_CERTIFICATE_PATH, and FE_CERTIFICATE_PIN.'
+  );
+
+  const unique = Date.now();
+  const emisorName = `${shouldBeDefault ? 'Emisor Playwright Default' : 'Emisor Playwright Secundario'} ${unique}`;
+  const emisorTradeName = `Comercial ${unique}`;
+  const emisorId = `3101${String(unique).slice(-6)}`;
+  const actividadEconomica = '1234.5';
+  const emisorEmail = `playwright+${unique}@example.com`;
+
+  await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe&fe_action=new_emisor');
+
+  if (/wp-login\.php/.test(page.url())) {
+    await completeWpAdminLogin(page);
+    await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe&fe_action=new_emisor');
+  }
+
+  test.skip(
+    /page=wc-settings$/.test(page.url()),
+    'Factura Electronica plugin/settings are not available in this environment.'
+  );
+
+  await expect(page).toHaveURL(/page=wc-settings&tab=fe&fe_action=new_emisor/);
+  await expect(page.locator('body')).toContainText(/Configuración FE|Agregar Nuevo Emisor/i);
+
+  const existingEmittersTable = page.locator('body');
+  const existingEmittersCount = await existingEmittersTable
+    .getByRole('link', { name: /Probar|Editar|Eliminar/i })
+    .count()
+    .catch(() => 0);
+
+  await page.fill('#nombre_legal', emisorName);
+  await page.fill('#cedula_juridica', emisorId);
+  await page.fill('#nombre_comercial', emisorTradeName);
+  await page.fill('#api_username', feApiUser);
+  await page.fill('#api_password', feApiPassword);
+  await page.setInputFiles('#certificate_file', feCertificatePath);
+  await page.fill('#certificate_pin', feCertificatePin);
+  await page.fill('#actividad_economica', actividadEconomica);
+  await expect(page.locator('#actividad_economica')).toHaveValue(/^\d{4}\.\d$/);
+  await page.fill('#codigo_provincia', '1');
+  await page.fill('#codigo_canton', '01');
+  await page.fill('#codigo_distrito', '01');
+  await page.fill('#codigo_barrio', '01');
+  await page.fill('#direccion', 'Direccion de prueba Playwright');
+  await page.fill('#telefono', '22223333');
+  await page.fill('#email', emisorEmail);
+
+  if (shouldBeDefault && existingEmittersCount === 0 && !(await page.locator('#is_parent').isChecked())) {
+    await page.check('#is_parent');
+  }
+
+  if (!shouldBeDefault && await page.locator('#is_parent').isChecked()) {
+    await page.uncheck('#is_parent');
+  }
+
+  if (!(await page.locator('#active').isChecked())) {
+    await page.check('#active');
+  }
+
+  await Promise.all([
+    page.waitForURL(/page=wc-settings&tab=fe(?:&|$)/),
+    page.getByRole('button', { name: 'Guardar Emisor' }).click(),
+  ]);
+
+  await expect(page.locator('body')).toContainText(/Emisor creado correctamente\./i);
+  await expect(page.locator('body')).toContainText(emisorName);
+  await expect(page.locator('body')).toContainText(emisorId);
+  await expect(page.locator('body')).toContainText(actividadEconomica);
+
+  const screenshotPath = testInfo.outputPath('fe-emitters-full-page.png');
+
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+
+  await testInfo.attach('fe-emitters-full-page', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
+}
+
 test('homepage responds and shows WordPress content', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveTitle(/Mi WordPress/i);
@@ -129,80 +212,9 @@ test('add product from wp-admin', async ({ page }) => {
 });
 
 test('add factura electronica emisor from WooCommerce settings', async ({ page }, testInfo) => {
-  test.skip(
-    !feApiUser || !feApiPassword || !feCertificatePath || !feCertificatePin,
-    'Factura Electronica test requires FE_API_USERNAME, FE_API_PASSWORD, FE_CERTIFICATE_PATH, and FE_CERTIFICATE_PIN.'
-  );
+  await createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault: true });
+});
 
-  const unique = Date.now();
-  const emisorName = `Emisor Playwright ${unique}`;
-  const emisorTradeName = `Comercial ${unique}`;
-  const emisorId = `3101${String(unique).slice(-6)}`;
-  const actividadEconomica = '1234.5';
-  const emisorEmail = `playwright+${unique}@example.com`;
-
-  await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe&fe_action=new_emisor');
-
-  if (/wp-login\.php/.test(page.url())) {
-    await completeWpAdminLogin(page);
-    await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe&fe_action=new_emisor');
-  }
-
-  test.skip(
-    /page=wc-settings$/.test(page.url()),
-    'Factura Electronica plugin/settings are not available in this environment.'
-  );
-
-  await expect(page).toHaveURL(/page=wc-settings&tab=fe&fe_action=new_emisor/);
-  await expect(page.locator('body')).toContainText(/Configuración FE|Agregar Nuevo Emisor/i);
-
-  const existingEmittersTable = page.locator('body');
-  const existingEmittersCount = await existingEmittersTable
-    .getByRole('link', { name: /Probar|Editar|Eliminar/i })
-    .count()
-    .catch(() => 0);
-
-  await page.fill('#nombre_legal', emisorName);
-  await page.fill('#cedula_juridica', emisorId);
-  await page.fill('#nombre_comercial', emisorTradeName);
-  await page.fill('#api_username', feApiUser);
-  await page.fill('#api_password', feApiPassword);
-  await page.setInputFiles('#certificate_file', feCertificatePath);
-  await page.fill('#certificate_pin', feCertificatePin);
-  await page.fill('#actividad_economica', actividadEconomica);
-  await expect(page.locator('#actividad_economica')).toHaveValue(/^\d{4}\.\d$/);
-  await page.fill('#codigo_provincia', '1');
-  await page.fill('#codigo_canton', '01');
-  await page.fill('#codigo_distrito', '01');
-  await page.fill('#codigo_barrio', '01');
-  await page.fill('#direccion', 'Direccion de prueba Playwright');
-  await page.fill('#telefono', '22223333');
-  await page.fill('#email', emisorEmail);
-
-  if (existingEmittersCount === 0 && !(await page.locator('#is_parent').isChecked())) {
-    await page.check('#is_parent');
-  }
-
-  if (!(await page.locator('#active').isChecked())) {
-    await page.check('#active');
-  }
-
-  await Promise.all([
-    page.waitForURL(/page=wc-settings&tab=fe(?:&|$)/),
-    page.getByRole('button', { name: 'Guardar Emisor' }).click(),
-  ]);
-
-  await expect(page.locator('body')).toContainText(/Emisor creado correctamente\./i);
-  await expect(page.locator('body')).toContainText(emisorName);
-  await expect(page.locator('body')).toContainText(emisorId);
-  await expect(page.locator('body')).toContainText(actividadEconomica);
-
-  const screenshotPath = testInfo.outputPath('fe-emitters-table.png');
-
-  await page.screenshot({ path: screenshotPath, fullPage: true });
-
-  await testInfo.attach('fe-emitters-table', {
-    path: screenshotPath,
-    contentType: 'image/png',
-  });
+test('add non-default factura electronica emisor from WooCommerce settings', async ({ page }, testInfo) => {
+  await createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault: false });
 });
