@@ -160,14 +160,16 @@ async function createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault 
   await expect(page.locator('body')).toContainText(emisorId);
   await expect(page.locator('body')).toContainText(actividadEconomica);
 
-  const screenshotPath = testInfo.outputPath('fe-emitters-full-page.png');
+  if (testInfo) {
+    const screenshotPath = testInfo.outputPath('fe-emitters-full-page.png');
 
-  await page.screenshot({ path: screenshotPath, fullPage: true });
+    await page.screenshot({ path: screenshotPath, fullPage: true });
 
-  await testInfo.attach('fe-emitters-full-page', {
-    path: screenshotPath,
-    contentType: 'image/png',
-  });
+    await testInfo.attach('fe-emitters-full-page', {
+      path: screenshotPath,
+      contentType: 'image/png',
+    });
+  }
 }
 
 async function getExistingProductName(page) {
@@ -233,6 +235,8 @@ async function addExistingProductToOrder(page, productName) {
 }
 
 async function createCompletedFacturaOrder(page) {
+  await createFacturaElectronicaEmisor(page, null, { shouldBeDefault: true });
+
   const productName = await getExistingProductName(page);
   const unique = Date.now();
   const cedulaFisica = '114440852';
