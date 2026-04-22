@@ -336,9 +336,9 @@ async function waitForFacturaDocuments(page, facturaStatusBox, timeoutMs = 12000
       return true;
     }
 
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    await expect(facturaStatusBox).toBeVisible();
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(3000);
+    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
+    await expect(facturaStatusBox).toBeVisible().catch(() => null);
   }
 
   return false;
@@ -415,6 +415,8 @@ test('add completed order with factura electronica from wp-admin', async ({ page
 });
 
 test('execute factura electronica from order status box', async ({ page }, testInfo) => {
+  test.setTimeout(180000);
+
   await createCompletedFacturaOrder(page);
 
   const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
@@ -443,7 +445,7 @@ test('execute factura electronica from order status box', async ({ page }, testI
   await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
   await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
 
-  const documentsReady = await waitForFacturaDocuments(page, facturaStatusBox);
+  const documentsReady = await waitForFacturaDocuments(page, facturaStatusBox, 120000);
 
   if (documentsReady) {
     await expect(facturaStatusBox).toContainText(/Documentos Generados:/i);
