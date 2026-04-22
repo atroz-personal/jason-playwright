@@ -205,28 +205,10 @@ async function addExistingProductToOrder(page, productName) {
   ]);
 
   const orderItemsBox = page.locator('#woocommerce-order-items');
-  const saveItemsButton = () => orderItemsBox.getByRole('button', { name: /^Save$/i });
-  if (await saveItemsButton().isVisible().catch(() => false)) {
-    await saveItemsButton().scrollIntoViewIfNeeded().catch(() => null);
-
-    let saved = false;
-    for (let attempt = 0; attempt < 3 && !saved; attempt += 1) {
-      try {
-        await Promise.all([
-          page.waitForLoadState('networkidle'),
-          saveItemsButton().click({ force: true }),
-        ]);
-        saved = true;
-      } catch (error) {
-        if (attempt === 2) {
-          throw error;
-        }
-        await page.waitForTimeout(1000);
-      }
-    }
-  }
-
   await expect(orderItemsBox).toContainText(productName, { timeout: 15_000 });
+  await expect(orderItemsBox.locator('.item, .name, .wc-order-item-name').filter({ hasText: productName }).first()).toBeVisible({
+    timeout: 15_000,
+  });
 }
 
 test('homepage responds and shows WordPress content', async ({ page }) => {
