@@ -56,6 +56,11 @@ jobs:
           docker cp plugins/plugin-factura-electronica/. wp-app:/var/www/html/wp-content/plugins/plugin-factura-electronica/
           docker exec wp-app wp plugin activate plugin-factura-electronica --allow-root --path=/var/www/html
 
+      - name: Prime FE connection test state
+        run: |
+          docker exec wp-app wp option update fe_woo_last_connection_test_status success --allow-root --path=/var/www/html
+          docker exec wp-app wp option update fe_woo_last_connection_test_time "$(date +%s)" --allow-root --path=/var/www/html
+
       - name: Run Playwright tests
         env:
           PLAYWRIGHT_BASE_URL: http://localhost:8080

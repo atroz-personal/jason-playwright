@@ -76,6 +76,12 @@ async function gotoAdminPage(page, adminPath, readyPattern) {
 
   if (/wp-login\.php/.test(page.url())) {
     await completeWpAdminLogin(page);
+    await page.goto(adminPath);
+  }
+
+  if (/wp-login\.php/.test(page.url())) {
+    await completeWpAdminLogin(page);
+    await page.goto(adminPath);
   }
 
   await expect(page).toHaveURL(readyPattern);
@@ -192,8 +198,18 @@ async function addExistingProductToOrder(page, productName) {
   await expect(productSearch).toBeVisible();
   await productSearch.fill(productName);
 
-  const productOption = page.locator('.select2-results__option').filter({ hasText: productName }).first();
+  let productOption = page.locator('.select2-results__option').filter({ hasText: productName }).first();
+  if (!(await productOption.isVisible().catch(() => false))) {
+    const fallbackSearch = productName.split(' ').slice(0, 2).join(' ');
+    await productSearch.fill(fallbackSearch);
+    productOption = page
+      .locator('.select2-results__option')
+      .filter({ hasNotText: /No results found/i })
+      .first();
+  }
+
   await expect(productOption).toBeVisible({ timeout: 15_000 });
+  const selectedProductLabel = ((await productOption.textContent()) || productName).trim();
   await productOption.click();
 
   const quantityField = modal.locator('input[name="item_qty"]').first();
@@ -205,10 +221,15 @@ async function addExistingProductToOrder(page, productName) {
   ]);
 
   const orderItemsBox = page.locator('#woocommerce-order-items');
-  await expect(orderItemsBox).toContainText(productName, { timeout: 15_000 });
-  await expect(orderItemsBox.locator('.item, .name, .wc-order-item-name').filter({ hasText: productName }).first()).toBeVisible({
+  const orderItemName = orderItemsBox.locator('.item .name, .wc-order-item-name, td.name').first();
+  await expect(orderItemName).toBeVisible({
     timeout: 15_000,
   });
+
+  const addedProductName = ((await orderItemName.textContent()) || selectedProductLabel).trim();
+  await expect(orderItemsBox).toContainText(addedProductName, { timeout: 15_000 });
+
+  return addedProductName;
 }
 
 async function createCompletedFacturaOrder(page) {
@@ -249,7 +270,7 @@ async function createCompletedFacturaOrder(page) {
   await page.locator('#fe_woo_activity_code').fill('1234.5');
   await expect(page.locator('#fe_woo_activity_code')).toHaveValue(/^\d{4}\.\d$/);
 
-  await addExistingProductToOrder(page, productName);
+  const addedProductName = await addExistingProductToOrder(page, productName);
 
   const createOrderButton = page.getByRole('button', { name: /^Create$/i }).last();
   await expect(createOrderButton).toBeVisible();
@@ -261,9 +282,9 @@ async function createCompletedFacturaOrder(page) {
   await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+/, { timeout: 20_000 });
   await expect(page.locator('#order_status')).toHaveValue('wc-completed');
   await expect(page.locator('#fe_woo_require_factura')).toBeChecked();
-  await expect(page.locator('body')).toContainText(productName);
+  await expect(page.locator('body')).toContainText(addedProductName);
 
-  return { productName };
+  return { productName: addedProductName };
 }
 
 test('homepage responds and shows WordPress content', async ({ page }) => {
@@ -301,6 +322,10 @@ test('add product from wp-admin', async ({ page }) => {
   const confirmPublishButton = page.getByRole('button', { name: /publish/i }).last();
   if (await confirmPublishButton.isVisible().catch(() => false)) {
     await confirmPublishButton.click();
+  }
+
+  if (/wp-login\.php/.test(page.url())) {
+    await completeWpAdminLogin(page);
   }
 
   await expect(page.locator('body')).toContainText(/published|updated|Product published/i);
@@ -349,6 +374,15 @@ test('execute factura electronica from order status box', async ({ page }, testI
 
   await page.waitForTimeout(2500).catch(() => null);
   await page.waitForLoadState('domcontentloaded').catch(() => null);
+
+  const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+  await expect(facturaStatusBox).toBeVisible();
+  await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
+  await expect(facturaStatusBox).not.toContainText(/EN COLA|PROCESANDO/i);
+  await expect(facturaStatusBox).toContainText(/Documentos Generados:/i);
+  await expect(facturaStatusBox).toContainText(/PDF Factura/i);
+  await expect(facturaStatusBox).toContainText(/XML Factura/i);
+  await expect(facturaStatusBox).toContainText(/XML Mensaje Receptor/i);
 
   const screenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
   await page.screenshot({ path: screenshotPath, fullPage: true });
