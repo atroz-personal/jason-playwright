@@ -164,6 +164,58 @@ async function createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault 
   });
 }
 
+async function getExistingProductName(page) {
+  await gotoAdminPage(page, '/wp-admin/edit.php?post_type=product', /edit\.php\?post_type=product/);
+
+  const productLink = page.locator('.row-title').first();
+  await expect(productLink).toBeVisible();
+
+  const productName = (await productLink.textContent())?.trim();
+
+  if (!productName) {
+    throw new Error('No existing WooCommerce product was found to use in the order smoke test.');
+  }
+
+  return productName;
+}
+
+async function addExistingProductToOrder(page, productName) {
+  await page.getByRole('button', { name: /Add item\(s\)/i }).click();
+  await page.getByRole('button', { name: /Add product\(s\)/i }).click();
+
+  const modal = page.locator('.wc-backbone-modal-content').last();
+  await expect(modal).toBeVisible();
+
+  await modal.locator('.select2-selection--single').click();
+
+  const productSearch = page.locator('.select2-container--open .select2-search__field').last();
+  await expect(productSearch).toBeVisible();
+  await productSearch.fill(productName);
+
+  const productOption = page.locator('.select2-results__option').filter({ hasText: productName }).first();
+  await expect(productOption).toBeVisible({ timeout: 15_000 });
+  await productOption.click();
+
+  const quantityField = modal.locator('input[name="item_qty"]').first();
+  await quantityField.fill('1');
+
+  await Promise.all([
+    page.waitForLoadState('networkidle'),
+    modal.locator('#btn-ok').click(),
+  ]);
+
+  const orderItemsBox = page.locator('#woocommerce-order-items');
+  const saveItemsButton = orderItemsBox.getByRole('button', { name: /^Save$/i });
+  if (await saveItemsButton.isVisible().catch(() => false)) {
+    await Promise.all([
+      page.waitForLoadState('networkidle'),
+      saveItemsButton.click(),
+    ]);
+  }
+
+  await expect(orderItemsBox).toContainText(productName, { timeout: 15_000 });
+}
+
 test('homepage responds and shows WordPress content', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveTitle(/Mi WordPress/i);
@@ -217,4 +269,64 @@ test('add factura electronica emisor from WooCommerce settings', async ({ page }
 
 test('add non-default factura electronica emisor from WooCommerce settings', async ({ page }, testInfo) => {
   await createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault: false });
+});
+
+test('add completed order with factura electronica from wp-admin', async ({ page }, testInfo) => {
+  const productName = await getExistingProductName(page);
+  const unique = Date.now();
+
+  await gotoAdminPage(page, '/wp-admin/admin.php?page=wc-orders&action=new', /page=wc-orders&action=new/);
+  await expect(page.locator('#order_status')).toBeVisible();
+  await expect(page.locator('body')).toContainText(/Add new order|Order actions|Order data|Nueva orden/i);
+
+  await page.locator('#order_status').selectOption('wc-completed');
+  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
+
+  const requireFacturaCheckbox = page.locator('#fe_woo_require_factura');
+  await expect(requireFacturaCheckbox).toBeVisible();
+  if (!(await requireFacturaCheckbox.isChecked())) {
+    await requireFacturaCheckbox.check();
+  }
+
+  await page.locator('#fe_woo_full_name').fill(`Cliente Playwright ${unique}`);
+
+  const idTypeField = page.locator('#fe_woo_id_type');
+  if (await idTypeField.isVisible().catch(() => false)) {
+    const options = await idTypeField.locator('option').evaluateAll((nodes) =>
+      nodes
+        .map((node) => ({ value: node.value, disabled: node.disabled }))
+        .filter((option) => option.value && !option.disabled)
+    );
+
+    if (options.length > 0) {
+      await idTypeField.selectOption(options[0].value);
+    }
+  }
+
+  await page.locator('#fe_woo_id_number').fill(`123456${String(unique).slice(-3)}`);
+  await page.locator('#fe_woo_invoice_email').fill(`playwright-order-${unique}@example.com`);
+  await page.locator('#fe_woo_phone').fill('22223333');
+  await page.locator('#fe_woo_activity_code').fill('1234.5');
+  await expect(page.locator('#fe_woo_activity_code')).toHaveValue(/^\d{4}\.\d$/);
+
+  await addExistingProductToOrder(page, productName);
+
+  const createOrderButton = page.getByRole('button', { name: /^Create$/i }).last();
+  await expect(createOrderButton).toBeVisible();
+  await Promise.all([
+    page.waitForLoadState('domcontentloaded'),
+    createOrderButton.click(),
+  ]);
+
+  await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+/, { timeout: 20_000 });
+  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
+  await expect(page.locator('#fe_woo_require_factura')).toBeChecked();
+  await expect(page.locator('body')).toContainText(productName);
+
+  const screenshotPath = testInfo.outputPath('wc-order-full-page.png');
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+  await testInfo.attach('wc-order-full-page', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
 });
