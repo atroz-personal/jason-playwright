@@ -172,6 +172,37 @@ async function createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault 
   }
 }
 
+async function ensureDefaultFacturaElectronicaEmisor(page) {
+  test.skip(
+    !feApiUser || !feApiPassword || !feCertificatePath || !feCertificatePin,
+    'Factura Electronica test requires FE_API_USERNAME, FE_API_PASSWORD, FE_CERTIFICATE_PATH, and FE_CERTIFICATE_PIN.'
+  );
+
+  await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe');
+
+  if (/wp-login\.php/.test(page.url())) {
+    await completeWpAdminLogin(page);
+    await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe');
+  }
+
+  test.skip(
+    /page=wc-settings$/.test(page.url()),
+    'Factura Electronica plugin/settings are not available in this environment.'
+  );
+
+  await expect(page).toHaveURL(/page=wc-settings&tab=fe/);
+  await expect(page.locator('body')).toContainText(/Configuración FE/i);
+
+  const defaultEmisorIndicators = page.locator('body').getByText(/⭐|por defecto|emisor padre/i);
+  const hasDefaultEmisor = (await defaultEmisorIndicators.count().catch(() => 0)) > 0;
+
+  if (!hasDefaultEmisor) {
+    await createFacturaElectronicaEmisor(page, null, { shouldBeDefault: true });
+    await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe');
+    await expect(page).toHaveURL(/page=wc-settings&tab=fe/);
+  }
+}
+
 async function getExistingProductName(page) {
   await gotoAdminPage(page, '/wp-admin/edit.php?post_type=product', /edit\.php\?post_type=product/);
 
@@ -235,7 +266,7 @@ async function addExistingProductToOrder(page, productName) {
 }
 
 async function createCompletedFacturaOrder(page) {
-  await createFacturaElectronicaEmisor(page, null, { shouldBeDefault: true });
+  await ensureDefaultFacturaElectronicaEmisor(page);
 
   const productName = await getExistingProductName(page);
   const unique = Date.now();
