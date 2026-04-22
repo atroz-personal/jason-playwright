@@ -211,6 +211,61 @@ async function addExistingProductToOrder(page, productName) {
   });
 }
 
+async function createCompletedFacturaOrder(page) {
+  const productName = await getExistingProductName(page);
+  const unique = Date.now();
+  const cedulaFisica = '114440852';
+
+  await gotoAdminPage(page, '/wp-admin/admin.php?page=wc-orders&action=new', /page=wc-orders&action=new/);
+  await expect(page.locator('#order_status')).toBeVisible();
+  await expect(page.locator('body')).toContainText(/Add new order|Order actions|Order data|Nueva orden/i);
+
+  await page.locator('#order_status').selectOption('wc-completed');
+  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
+
+  const requireFacturaCheckbox = page.locator('#fe_woo_require_factura');
+  await expect(requireFacturaCheckbox).toBeVisible();
+  if (!(await requireFacturaCheckbox.isChecked())) {
+    await requireFacturaCheckbox.check();
+  }
+
+  const idTypeField = page.locator('#fe_woo_id_type');
+  if (await idTypeField.isVisible().catch(() => false)) {
+    const cedulaFisicaOption = await idTypeField.locator('option').evaluateAll((nodes) => {
+      const match = nodes.find((node) => /Cédula Física/i.test(node.textContent || ''));
+      return match ? match.value : '';
+    });
+
+    if (!cedulaFisicaOption) {
+      throw new Error('Could not find the "Cédula Física" option in the FE identification type select.');
+    }
+
+    await idTypeField.selectOption(cedulaFisicaOption);
+  }
+
+  await page.locator('#fe_woo_id_number').fill(cedulaFisica);
+  await page.locator('#fe_woo_invoice_email').fill(`playwright-order-${unique}@example.com`);
+  await page.locator('#fe_woo_phone').fill('22223333');
+  await page.locator('#fe_woo_activity_code').fill('1234.5');
+  await expect(page.locator('#fe_woo_activity_code')).toHaveValue(/^\d{4}\.\d$/);
+
+  await addExistingProductToOrder(page, productName);
+
+  const createOrderButton = page.getByRole('button', { name: /^Create$/i }).last();
+  await expect(createOrderButton).toBeVisible();
+  await Promise.all([
+    page.waitForLoadState('domcontentloaded'),
+    createOrderButton.click(),
+  ]);
+
+  await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+/, { timeout: 20_000 });
+  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
+  await expect(page.locator('#fe_woo_require_factura')).toBeChecked();
+  await expect(page.locator('body')).toContainText(productName);
+
+  return { productName };
+}
+
 test('homepage responds and shows WordPress content', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveTitle(/Mi WordPress/i);
@@ -267,60 +322,37 @@ test('add non-default factura electronica emisor from WooCommerce settings', asy
 });
 
 test('add completed order with factura electronica from wp-admin', async ({ page }, testInfo) => {
-  const productName = await getExistingProductName(page);
-  const unique = Date.now();
-  const cedulaFisica = '114440852';
-
-  await gotoAdminPage(page, '/wp-admin/admin.php?page=wc-orders&action=new', /page=wc-orders&action=new/);
-  await expect(page.locator('#order_status')).toBeVisible();
-  await expect(page.locator('body')).toContainText(/Add new order|Order actions|Order data|Nueva orden/i);
-
-  await page.locator('#order_status').selectOption('wc-completed');
-  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
-
-  const requireFacturaCheckbox = page.locator('#fe_woo_require_factura');
-  await expect(requireFacturaCheckbox).toBeVisible();
-  if (!(await requireFacturaCheckbox.isChecked())) {
-    await requireFacturaCheckbox.check();
-  }
-
-  const idTypeField = page.locator('#fe_woo_id_type');
-  if (await idTypeField.isVisible().catch(() => false)) {
-    const cedulaFisicaOption = await idTypeField.locator('option').evaluateAll((nodes) => {
-      const match = nodes.find((node) => /Cédula Física/i.test(node.textContent || ''));
-      return match ? match.value : '';
-    });
-
-    if (!cedulaFisicaOption) {
-      throw new Error('Could not find the "Cédula Física" option in the FE identification type select.');
-    }
-
-    await idTypeField.selectOption(cedulaFisicaOption);
-  }
-
-  await page.locator('#fe_woo_id_number').fill(cedulaFisica);
-  await page.locator('#fe_woo_invoice_email').fill(`playwright-order-${unique}@example.com`);
-  await page.locator('#fe_woo_phone').fill('22223333');
-  await page.locator('#fe_woo_activity_code').fill('1234.5');
-  await expect(page.locator('#fe_woo_activity_code')).toHaveValue(/^\d{4}\.\d$/);
-
-  await addExistingProductToOrder(page, productName);
-
-  const createOrderButton = page.getByRole('button', { name: /^Create$/i }).last();
-  await expect(createOrderButton).toBeVisible();
-  await Promise.all([
-    page.waitForLoadState('domcontentloaded'),
-    createOrderButton.click(),
-  ]);
-
-  await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+/, { timeout: 20_000 });
-  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
-  await expect(page.locator('#fe_woo_require_factura')).toBeChecked();
-  await expect(page.locator('body')).toContainText(productName);
+  await createCompletedFacturaOrder(page);
 
   const screenshotPath = testInfo.outputPath('wc-order-full-page.png');
   await page.screenshot({ path: screenshotPath, fullPage: true });
   await testInfo.attach('wc-order-full-page', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
+});
+
+test('execute factura electronica from order status box', async ({ page }, testInfo) => {
+  await createCompletedFacturaOrder(page);
+
+  const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
+  await expect(ejecutarButton).toBeVisible();
+
+  await ejecutarButton.click();
+
+  await page.waitForFunction(() => {
+    return Boolean(
+      document.querySelector('.fe-woo-notice') ||
+      !document.querySelector('.fe-woo-ejecutar-factura')
+    );
+  }, { timeout: 20_000 });
+
+  await page.waitForTimeout(2500).catch(() => null);
+  await page.waitForLoadState('domcontentloaded').catch(() => null);
+
+  const screenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+  await testInfo.attach('wc-order-execute-full-page', {
     path: screenshotPath,
     contentType: 'image/png',
   });
