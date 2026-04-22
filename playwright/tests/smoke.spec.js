@@ -445,6 +445,7 @@ test('execute factura electronica from order status box', async ({ page }, testI
   await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
   await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
 
+  await page.waitForTimeout(10000);
   const documentsReady = await waitForFacturaDocuments(page, facturaStatusBox, 120000);
 
   if (documentsReady) {
