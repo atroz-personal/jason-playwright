@@ -38,6 +38,13 @@ jobs:
           docker compose logs
           exit 1
 
+      - name: Fix WordPress writable directories
+        run: |
+          docker exec wp-app sh -lc 'mkdir -p /var/www/html/wp-content/uploads /var/www/html/wp-content/upgrade /var/www/html/wp-content/cache'
+          docker exec wp-app sh -lc 'chown -R www-data:www-data /var/www/html/wp-content'
+          docker exec wp-app sh -lc 'find /var/www/html/wp-content -type d -exec chmod 775 {} \;'
+          docker exec wp-app sh -lc 'find /var/www/html/wp-content -type f -exec chmod 664 {} \;'
+
       - name: Install npm dependencies
         run: npm install
 
