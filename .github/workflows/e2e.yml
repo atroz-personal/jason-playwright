@@ -41,6 +41,8 @@ jobs:
       - name: Fix WordPress writable directories
         run: |
           docker exec wp-app sh -lc 'mkdir -p /var/www/html/wp-content/uploads /var/www/html/wp-content/upgrade /var/www/html/wp-content/cache'
+          UPLOAD_BASE=$(docker exec wp-app wp eval 'echo wp_upload_dir()["basedir"];' --allow-root --path=/var/www/html)
+          docker exec wp-app sh -lc "mkdir -p \"$UPLOAD_BASE/fe-woo/certificates\""
           docker exec wp-app sh -lc 'chown -R www-data:www-data /var/www/html/wp-content'
           docker exec wp-app sh -lc 'find /var/www/html/wp-content -type d -exec chmod 775 {} \;'
           docker exec wp-app sh -lc 'find /var/www/html/wp-content -type f -exec chmod 664 {} \;'
