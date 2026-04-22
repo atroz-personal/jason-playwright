@@ -286,7 +286,16 @@ test('add completed order with factura electronica from wp-admin', async ({ page
 
   const idTypeField = page.locator('#fe_woo_id_type');
   if (await idTypeField.isVisible().catch(() => false)) {
-    await idTypeField.selectOption({ label: /Cédula Física/i });
+    const cedulaFisicaOption = await idTypeField.locator('option').evaluateAll((nodes) => {
+      const match = nodes.find((node) => /Cédula Física/i.test(node.textContent || ''));
+      return match ? match.value : '';
+    });
+
+    if (!cedulaFisicaOption) {
+      throw new Error('Could not find the "Cédula Física" option in the FE identification type select.');
+    }
+
+    await idTypeField.selectOption(cedulaFisicaOption);
   }
 
   await page.locator('#fe_woo_id_number').fill(cedulaFisica);
