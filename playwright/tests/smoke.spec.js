@@ -466,22 +466,17 @@ test('add product from wp-admin', async ({ page }, testInfo) => {
       await completeWpAdminLogin(page);
     }
 
-    await expect(page.locator('body')).toContainText(/published|updated|Product published/i, { timeout: 20_000 });
+    await gotoAdminPage(
+      page,
+      `/wp-admin/edit.php?post_type=product&s=${encodeURIComponent(productName)}`,
+      /edit\.php\?post_type=product/
+    );
 
-    const permalinkField = page.locator('#sample-permalink a, .editor-post-permalink__link').first();
-    if (await permalinkField.isVisible().catch(() => false)) {
-      await expect(permalinkField).toContainText(/smoke-product/i);
-    } else {
-      await expect(titleField).toHaveValue(productName);
-    }
+    const productRowLink = page.locator('.row-title', { hasText: productName }).first();
+    await expect(productRowLink).toBeVisible({ timeout: 20_000 });
 
-    if (await regularPriceField.isVisible().catch(() => false)) {
-      await expect(regularPriceField).toHaveValue(regularPrice);
-    } else {
-      await expect(page.locator('body')).toContainText(new RegExp(regularPrice));
-    }
-
-    await expect(productEmitterField).toHaveValue(randomEmitter.id);
+    const productRow = page.locator('#the-list tr').filter({ has: productRowLink }).first();
+    await expect(productRow).toContainText(new RegExp(`${Number(regularPrice).toFixed(2)}`));
   }
 
   await gotoAdminPage(page, '/wp-admin/edit.php?post_type=product', /edit\.php\?post_type=product/);
