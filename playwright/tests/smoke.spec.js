@@ -203,22 +203,26 @@ async function ensureDefaultFacturaElectronicaEmisor(page) {
   }
 }
 
-async function getExistingProductName(page) {
+async function getExistingProductNames(page) {
   await gotoAdminPage(page, '/wp-admin/edit.php?post_type=product', /edit\.php\?post_type=product/);
 
-  const productLink = page.locator('.row-title').first();
-  await expect(productLink).toBeVisible();
+  const productLinks = page.locator('.row-title');
+  await expect(productLinks.first()).toBeVisible();
 
-  const productName = (await productLink.textContent())?.trim();
+  const productNames = (await productLinks.evaluateAll((nodes) =>
+    nodes
+      .map((node) => node.textContent?.trim() || '')
+      .filter(Boolean)
+  ));
 
-  if (!productName) {
+  if (productNames.length === 0) {
     throw new Error('No existing WooCommerce product was found to use in the order smoke test.');
   }
 
-  return productName;
+  return productNames;
 }
 
-async function addExistingProductToOrder(page, productName) {
+async function addExistingProductToOrder(page, productName, quantity) {
   await page.getByRole('button', { name: /Add item\(s\)/i }).click();
   await page.getByRole('button', { name: /Add product\(s\)/i }).click();
 
@@ -246,7 +250,7 @@ async function addExistingProductToOrder(page, productName) {
   await productOption.click();
 
   const quantityField = modal.locator('input[name="item_qty"]').first();
-  await quantityField.fill('1');
+  await quantityField.fill(String(quantity));
 
   await Promise.all([
     page.waitForLoadState('networkidle'),
@@ -268,7 +272,10 @@ async function addExistingProductToOrder(page, productName) {
 async function createCompletedFacturaOrder(page) {
   await ensureDefaultFacturaElectronicaEmisor(page);
 
-  const productName = await getExistingProductName(page);
+  const productNames = await getExistingProductNames(page);
+  const shuffledProductNames = [...productNames].sort(() => Math.random() - 0.5);
+  const selectedProductCount = Math.min(shuffledProductNames.length, Math.floor(Math.random() * 3) + 1);
+  const selectedProducts = shuffledProductNames.slice(0, selectedProductCount);
   const unique = Date.now();
   const cedulaFisica = '114440852';
 
@@ -305,7 +312,12 @@ async function createCompletedFacturaOrder(page) {
   await page.locator('#fe_woo_activity_code').fill('1234.5');
   await expect(page.locator('#fe_woo_activity_code')).toHaveValue(/^\d{4}\.\d$/);
 
-  const addedProductName = await addExistingProductToOrder(page, productName);
+  const addedProducts = [];
+  for (const productName of selectedProducts) {
+    const quantity = Math.floor(Math.random() * 10) + 1;
+    const addedProductName = await addExistingProductToOrder(page, productName, quantity);
+    addedProducts.push({ name: addedProductName, quantity });
+  }
 
   const createOrderButton = page.getByRole('button', { name: /^Create$/i }).last();
   await expect(createOrderButton).toBeVisible();
@@ -317,9 +329,11 @@ async function createCompletedFacturaOrder(page) {
   await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+/, { timeout: 20_000 });
   await expect(page.locator('#order_status')).toHaveValue('wc-completed');
   await expect(page.locator('#fe_woo_require_factura')).toBeChecked();
-  await expect(page.locator('body')).toContainText(addedProductName);
+  for (const addedProduct of addedProducts) {
+    await expect(page.locator('body')).toContainText(addedProduct.name);
+  }
 
-  return { productName: addedProductName };
+  return { productNames: addedProducts.map((product) => product.name) };
 }
 
 test('homepage responds and shows WordPress content', async ({ page }) => {
