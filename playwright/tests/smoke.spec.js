@@ -374,41 +374,19 @@ async function addExistingProductToOrder(page, productName, quantity) {
 }
 
 async function createCompletedFacturaOrder(page, options = {}) {
-  const { itemCount, minItemCount, maxItemCount, requireDistinctEmitters = false } = options;
-  const emitters = requireDistinctEmitters
-    ? await ensureMinimumFacturaElectronicaEmitters(page, maxItemCount || itemCount || 3)
-    : (await ensureDefaultFacturaElectronicaEmisor(page), null);
+  const { itemCount, minItemCount, maxItemCount } = options;
+  await ensureDefaultFacturaElectronicaEmisor(page);
 
+  const productNames = await getExistingProductNames(page);
   const randomItemCount = Math.floor(Math.random() * ((maxItemCount || 3) - (minItemCount || 1) + 1)) + (minItemCount || 1);
   const selectedProductCount = Math.min(
-    requireDistinctEmitters ? emitters.length : (await getExistingProductNames(page)).length,
+    productNames.length,
     itemCount || randomItemCount
   );
+  const shuffledProductNames = [...productNames].sort(() => Math.random() - 0.5);
   const unique = Date.now();
   const cedulaFisica = '114440852';
-
-  let selectedProducts;
-  if (requireDistinctEmitters) {
-    const selectedEmitters = [...emitters].sort(() => Math.random() - 0.5).slice(0, selectedProductCount);
-    selectedProducts = [];
-    for (let index = 0; index < selectedEmitters.length; index += 1) {
-      const emitter = selectedEmitters[index];
-      const productName = `Execute FE Product ${unique}-${index + 1}`;
-      const regularPrice = String(10 + index * 5);
-      await createProductWithFacturaEmitter(page, {
-        productName,
-        regularPrice,
-        emitterId: emitter.id,
-        description: `Execute factura product ${index + 1} for emitter ${emitter.name}.`,
-      });
-      selectedProducts.push(productName);
-    }
-  } else {
-    await ensureDefaultFacturaElectronicaEmisor(page);
-    const productNames = await getExistingProductNames(page);
-    const shuffledProductNames = [...productNames].sort(() => Math.random() - 0.5);
-    selectedProducts = shuffledProductNames.slice(0, selectedProductCount);
-  }
+  const selectedProducts = shuffledProductNames.slice(0, selectedProductCount);
 
   await gotoAdminPage(page, '/wp-admin/admin.php?page=wc-orders&action=new', /page=wc-orders&action=new/);
   await expect(page.locator('#order_status')).toBeVisible();
@@ -537,7 +515,7 @@ test('add completed order with factura electronica from wp-admin', async ({ page
 test('execute factura electronica from order status box', async ({ page }, testInfo) => {
   test.setTimeout(180000);
 
-  await createCompletedFacturaOrder(page, { minItemCount: 1, maxItemCount: 10, requireDistinctEmitters: true });
+  await createCompletedFacturaOrder(page, { minItemCount: 1, maxItemCount: 10 });
 
   const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
   await expect(ejecutarButton).toBeVisible();
