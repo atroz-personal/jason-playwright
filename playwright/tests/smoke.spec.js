@@ -32,6 +32,10 @@ const feApiPassword = process.env.FE_API_PASSWORD || envFile.FE_API_PASSWORD || 
 const feCertificatePath = process.env.FE_CERTIFICATE_PATH || envFile.FE_CERTIFICATE_PATH || '';
 const feCertificatePin = process.env.FE_CERTIFICATE_PIN || envFile.FE_CERTIFICATE_PIN || '';
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 async function completeWpAdminLogin(page) {
   await expect(page.locator('#loginform')).toBeVisible();
 
@@ -323,7 +327,12 @@ async function createProductWithFacturaEmitter(page, { productName, regularPrice
   const productRow = page.locator('#the-list tr').filter({ has: productRowLink }).first();
   await expect(productRow).toContainText(new RegExp(`${Number(regularPrice).toFixed(2)}`));
 
-  return productName;
+  const editLink = await productRowLink.getAttribute('href');
+
+  return {
+    productName,
+    editLink,
+  };
 }
 
 async function addExistingProductToOrder(page, productName, quantity) {
@@ -339,13 +348,16 @@ async function addExistingProductToOrder(page, productName, quantity) {
   await expect(productSearch).toBeVisible();
   await productSearch.fill(productName);
 
-  let productOption = page.locator('.select2-results__option').filter({ hasText: productName }).first();
+  let productOption = page
+    .locator('.select2-results__option')
+    .filter({ hasText: new RegExp(`^\\s*${escapeRegExp(productName)}\\s*$`) })
+    .first();
   if (!(await productOption.isVisible().catch(() => false))) {
-    const fallbackSearch = productName.split(' ').slice(0, 2).join(' ');
+    const fallbackSearch = productName.split(' ').slice(-1).join(' ');
     await productSearch.fill(fallbackSearch);
     productOption = page
       .locator('.select2-results__option')
-      .filter({ hasNotText: /No results found/i })
+      .filter({ hasText: new RegExp(escapeRegExp(fallbackSearch)) })
       .first();
   }
 
@@ -457,13 +469,13 @@ async function createCompletedFacturaOrderWithMixedEmitters(page) {
   const unique = Date.now();
   const productDefinitions = [
     {
-      productName: `Execute FE Default Product ${unique}-1`,
+      productName: `Execute Default ${unique}-A`,
       regularPrice: '15',
       emitterId: defaultEmitter.id,
       description: `Execute factura product using default emitter ${defaultEmitter.name}.`,
     },
     {
-      productName: `Execute FE Secondary Product ${unique}-2`,
+      productName: `Execute Secondary ${unique}-B`,
       regularPrice: '20',
       emitterId: nonDefaultEmitters[0].id,
       description: `Execute factura product using non-default emitter ${nonDefaultEmitters[0].name}.`,
@@ -471,7 +483,8 @@ async function createCompletedFacturaOrderWithMixedEmitters(page) {
   ];
 
   for (const productDefinition of productDefinitions) {
-    await createProductWithFacturaEmitter(page, productDefinition);
+    const createdProduct = await createProductWithFacturaEmitter(page, productDefinition);
+    productDefinition.editLink = createdProduct.editLink;
   }
 
   const cedulaFisica = '114440852';
@@ -529,10 +542,14 @@ async function createCompletedFacturaOrderWithMixedEmitters(page) {
     await expect(page.locator('body')).toContainText(addedProduct.name);
   }
 
+  const orderUrl = page.url();
+
   return {
     productNames: addedProducts.map((product) => product.name),
     defaultEmitterName: defaultEmitter.name,
     nonDefaultEmitterName: nonDefaultEmitters[0].name,
+    productDefinitions,
+    orderUrl,
   };
 }
 
@@ -655,6 +672,26 @@ test('execute factura electronica with default and non-default emitters', async 
   test.setTimeout(180000);
 
   const orderInfo = await createCompletedFacturaOrderWithMixedEmitters(page);
+
+  for (const [index, productDefinition] of orderInfo.productDefinitions.entries()) {
+    if (!productDefinition.editLink) {
+      continue;
+    }
+
+    await page.goto(productDefinition.editLink);
+    await expect(page.locator('body')).toContainText(/Edit product|Editar producto|Product data/i);
+    await expect(page.locator('#fe_woo_emisor_id')).toHaveValue(productDefinition.emitterId);
+
+    const productEditScreenshotPath = testInfo.outputPath(`wc-order-execute-mixed-emitter-product-${index + 1}.png`);
+    await page.screenshot({ path: productEditScreenshotPath, fullPage: true });
+    await testInfo.attach(`wc-order-execute-mixed-emitter-product-${index + 1}`, {
+      path: productEditScreenshotPath,
+      contentType: 'image/png',
+    });
+  }
+
+  await page.goto(orderInfo.orderUrl);
+  await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+/);
 
   const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
   await expect(ejecutarButton).toBeVisible();
