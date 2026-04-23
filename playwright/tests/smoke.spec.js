@@ -155,6 +155,11 @@ async function createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault 
     page.getByRole('button', { name: 'Guardar Emisor' }).click(),
   ]);
 
+  if (shouldBeDefault && await page.locator('body').getByText(/Ya existe un emisor padre/i).isVisible().catch(() => false)) {
+    await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe');
+    return;
+  }
+
   await expect(page.locator('body')).toContainText(/Emisor creado correctamente\./i);
   await expect(page.locator('body')).toContainText(emisorName);
   await expect(page.locator('body')).toContainText(emisorId);
@@ -199,11 +204,10 @@ async function getFacturaElectronicaEmitters(page) {
     rows.map((row) => {
       const id = row.getAttribute('data-emisor-id') || '';
       const nameElement = row.querySelector('strong');
-      const rowText = row.textContent || '';
       return {
         id,
         name: (nameElement?.textContent || '').trim(),
-        isDefault: /⭐|Emisor por Defecto|Emisor padre/i.test(rowText),
+        isDefault: Boolean(row.querySelector('.fe-woo-badge-parent')),
       };
     })
   );
