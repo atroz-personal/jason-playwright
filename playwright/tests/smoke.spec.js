@@ -335,42 +335,77 @@ test('wp-admin login page is reachable', async ({ page }) => {
   await expect(page.locator('#user_pass')).toBeVisible();
 });
 
-test('add product from wp-admin', async ({ page }) => {
-  const productName = `Smoke Product ${Date.now()}`;
+test('add product from wp-admin', async ({ page }, testInfo) => {
+  const productCount = Math.floor(Math.random() * 3) + 1;
 
-  await gotoAdminPage(page, '/wp-admin/post-new.php?post_type=product', /post-new\.php\?post_type=product/);
-  await expect(page.locator('body')).toContainText(/Add new product|Create product|New product|Edit product/i);
+  for (let index = 0; index < productCount; index += 1) {
+    const unique = `${Date.now()}-${index + 1}`;
+    const productName = `Smoke Product ${unique}`;
+    const regularPrice = String(10 + index * 5);
 
-  const titleField = page.locator('input[name="post_title"], .editor-post-title__input, h1[contenteditable="true"]').first();
-  await titleField.click();
-  await titleField.fill(productName);
+    await gotoAdminPage(page, '/wp-admin/post-new.php?post_type=product', /post-new\.php\?post_type=product/);
+    await expect(page.locator('body')).toContainText(/Add new product|Create product|New product|Edit product/i);
 
-  const descriptionField = page.locator('[aria-label="Add description"], [role="textbox"][contenteditable="true"]').first();
-  if (await descriptionField.isVisible().catch(() => false)) {
-    await descriptionField.click();
-    await descriptionField.fill('Product created by Playwright smoke test.');
+    const titleField = page.locator('input[name="post_title"], .editor-post-title__input, h1[contenteditable="true"]').first();
+    await titleField.click();
+    await titleField.fill(productName);
+
+    const descriptionField = page.locator('[aria-label="Add description"], [role="textbox"][contenteditable="true"]').first();
+    if (await descriptionField.isVisible().catch(() => false)) {
+      await descriptionField.click();
+      await descriptionField.fill(`Product ${index + 1} created by Playwright smoke test.`);
+    }
+
+    const regularPriceField = page.locator('input[name="_regular_price"], #_regular_price').first();
+    if (await regularPriceField.isVisible().catch(() => false)) {
+      await regularPriceField.fill(regularPrice);
+    }
+
+    const pricingTabButton = page.getByRole('button', { name: /pricing|general/i }).first();
+    if (!(await regularPriceField.isVisible().catch(() => false)) && await pricingTabButton.isVisible().catch(() => false)) {
+      await pricingTabButton.click();
+      if (await regularPriceField.isVisible().catch(() => false)) {
+        await regularPriceField.fill(regularPrice);
+      }
+    }
+
+    const publishButton = page.getByRole('button', { name: /publish/i }).last();
+    await publishButton.click();
+
+    const confirmPublishButton = page.getByRole('button', { name: /publish/i }).last();
+    if (await confirmPublishButton.isVisible().catch(() => false)) {
+      await confirmPublishButton.click();
+    }
+
+    if (/wp-login\.php/.test(page.url())) {
+      await completeWpAdminLogin(page);
+    }
+
+    await expect(page.locator('body')).toContainText(/published|updated|Product published/i);
+
+    const permalinkField = page.locator('#sample-permalink a, .editor-post-permalink__link').first();
+    if (await permalinkField.isVisible().catch(() => false)) {
+      await expect(permalinkField).toContainText(/smoke-product/i);
+    } else {
+      await expect(titleField).toHaveValue(productName);
+    }
+
+    if (await regularPriceField.isVisible().catch(() => false)) {
+      await expect(regularPriceField).toHaveValue(regularPrice);
+    } else {
+      await expect(page.locator('body')).toContainText(new RegExp(regularPrice));
+    }
   }
 
-  const publishButton = page.getByRole('button', { name: /publish/i }).last();
-  await publishButton.click();
+  await gotoAdminPage(page, '/wp-admin/edit.php?post_type=product', /edit\.php\?post_type=product/);
+  await expect(page.locator('body')).toContainText(/Products|Todos los productos|Add new product/i);
 
-  const confirmPublishButton = page.getByRole('button', { name: /publish/i }).last();
-  if (await confirmPublishButton.isVisible().catch(() => false)) {
-    await confirmPublishButton.click();
-  }
-
-  if (/wp-login\.php/.test(page.url())) {
-    await completeWpAdminLogin(page);
-  }
-
-  await expect(page.locator('body')).toContainText(/published|updated|Product published/i);
-
-  const permalinkField = page.locator('#sample-permalink a, .editor-post-permalink__link').first();
-  if (await permalinkField.isVisible().catch(() => false)) {
-    await expect(permalinkField).toContainText(/smoke-product/i);
-  } else {
-    await expect(titleField).toHaveValue(productName);
-  }
+  const screenshotPath = testInfo.outputPath('products-full-page.png');
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+  await testInfo.attach('products-full-page', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
 });
 
 test('add factura electronica emisor from WooCommerce settings', async ({ page }, testInfo) => {
