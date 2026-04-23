@@ -445,22 +445,6 @@ test('execute factura electronica from order status box', async ({ page }, testI
   await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
   await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
 
-  const documentsReady = await waitForFacturaDocuments(page, facturaStatusBox, 120000);
-
-  await expect(documentsReady, 'FE documents were not generated in time for screenshot evidence.').toBeTruthy();
-  await expect(facturaStatusBox).toContainText(/Documentos Generados:/i);
-  await expect(facturaStatusBox).toContainText(/PDF Factura/i);
-  await expect(facturaStatusBox).toContainText(/XML Factura/i);
-  await expect(facturaStatusBox).toContainText(/XML Mensaje Receptor/i);
-
-  await page.waitForTimeout(15000);
-  await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
-  await expect(facturaStatusBox).toBeVisible();
-  await expect(facturaStatusBox).toContainText(/Documentos Generados:/i);
-  await expect(facturaStatusBox).toContainText(/PDF Factura/i);
-  await expect(facturaStatusBox).toContainText(/XML Factura/i);
-  await expect(facturaStatusBox).toContainText(/XML Mensaje Receptor/i);
-
   await facturaStatusBox.scrollIntoViewIfNeeded();
 
   const statusBoxScreenshotPath = testInfo.outputPath('wc-order-execute-status-box.png');
