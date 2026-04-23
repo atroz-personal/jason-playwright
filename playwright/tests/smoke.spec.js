@@ -319,7 +319,7 @@ async function createCompletedFacturaOrder(page) {
   await expect(page.locator('#fe_woo_require_factura')).toBeChecked();
   await expect(page.locator('body')).toContainText(addedProductName);
 
-  return { productName: addedProductName, orderUrl: page.url() };
+  return { productName: addedProductName };
 }
 
 async function waitForFacturaDocuments(page, facturaStatusBox, timeoutMs = 120000) {
@@ -414,71 +414,50 @@ test('add completed order with factura electronica from wp-admin', async ({ page
   });
 });
 
-let executedFacturaOrderUrl = null;
+test('execute factura electronica from order status box', async ({ page }, testInfo) => {
+  test.setTimeout(180000);
 
-test.describe('factura electronica order flow', () => {
-  test.describe.configure({ mode: 'serial' });
+  await createCompletedFacturaOrder(page);
 
-  test('execute factura electronica from order status box', async ({ page }, testInfo) => {
-    test.setTimeout(180000);
+  const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
+  await expect(ejecutarButton).toBeVisible();
 
-    const { orderUrl } = await createCompletedFacturaOrder(page);
-    executedFacturaOrderUrl = orderUrl;
+  await ejecutarButton.click();
 
-    const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
-    await expect(ejecutarButton).toBeVisible();
+  await page.waitForFunction(() => {
+    return Boolean(
+      document.querySelector('.fe-woo-notice') ||
+      !document.querySelector('.fe-woo-ejecutar-factura')
+    );
+  }, { timeout: 20_000 });
 
-    await ejecutarButton.click();
+  await page.waitForTimeout(2500).catch(() => null);
+  await page.waitForLoadState('domcontentloaded').catch(() => null);
 
-    await page.waitForFunction(() => {
-      return Boolean(
-        document.querySelector('.fe-woo-notice') ||
-        !document.querySelector('.fe-woo-ejecutar-factura')
-      );
-    }, { timeout: 20_000 });
+  const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+  await expect(facturaStatusBox).toBeVisible();
+  await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
+  await expect(facturaStatusBox).not.toContainText(/EN COLA/i);
+  await expect(facturaStatusBox).toContainText(/Clave:/i);
+  await expect(facturaStatusBox).toContainText(/Estado Local:/i);
+  await expect(facturaStatusBox).toContainText(/Enviada/i);
+  await expect(facturaStatusBox).toContainText(/Estado Hacienda:/i);
+  await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
+  await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
 
-    await page.waitForTimeout(2500).catch(() => null);
-    await page.waitForLoadState('domcontentloaded').catch(() => null);
+  await facturaStatusBox.scrollIntoViewIfNeeded();
 
-    const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
-    await expect(facturaStatusBox).toBeVisible();
-    await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
-    await expect(facturaStatusBox).not.toContainText(/EN COLA/i);
-    await expect(facturaStatusBox).toContainText(/Clave:/i);
-    await expect(facturaStatusBox).toContainText(/Estado Local:/i);
-    await expect(facturaStatusBox).toContainText(/Enviada/i);
-    await expect(facturaStatusBox).toContainText(/Estado Hacienda:/i);
-    await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
-    await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
-
-    await facturaStatusBox.scrollIntoViewIfNeeded();
-
-    const statusBoxScreenshotPath = testInfo.outputPath('wc-order-execute-status-box.png');
-    await facturaStatusBox.screenshot({ path: statusBoxScreenshotPath });
-    await testInfo.attach('wc-order-execute-status-box', {
-      path: statusBoxScreenshotPath,
-      contentType: 'image/png',
-    });
-
-    const fullPageScreenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
-    await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
-    await testInfo.attach('wc-order-execute-full-page', {
-      path: fullPageScreenshotPath,
-      contentType: 'image/png',
-    });
+  const statusBoxScreenshotPath = testInfo.outputPath('wc-order-execute-status-box.png');
+  await facturaStatusBox.screenshot({ path: statusBoxScreenshotPath });
+  await testInfo.attach('wc-order-execute-status-box', {
+    path: statusBoxScreenshotPath,
+    contentType: 'image/png',
   });
 
-  test('capture full order screenshot for executed factura order', async ({ page }, testInfo) => {
-    test.skip(!executedFacturaOrderUrl, 'No executed factura order URL was captured from the previous test.');
-
-    await gotoAdminPage(page, executedFacturaOrderUrl.replace('http://localhost:8080', ''), /page=wc-orders&action=edit&id=\d+/);
-    await expect(page.locator('body')).toContainText(/Order #\d+ details|Order actions|Factura Electrónica/i);
-
-    const fullOrderScreenshotPath = testInfo.outputPath('wc-order-after-execute-full-page.png');
-    await page.screenshot({ path: fullOrderScreenshotPath, fullPage: true });
-    await testInfo.attach('wc-order-after-execute-full-page', {
-      path: fullOrderScreenshotPath,
-      contentType: 'image/png',
-    });
+  const fullPageScreenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
+  await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
+  await testInfo.attach('wc-order-execute-full-page', {
+    path: fullPageScreenshotPath,
+    contentType: 'image/png',
   });
 });
