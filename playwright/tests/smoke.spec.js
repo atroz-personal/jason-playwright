@@ -565,12 +565,14 @@ async function expectFacturaElectronicaExecutionSuccess(facturaStatusBox) {
   await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente|\d+\s+Factura(?:s)?\s+Generada(?:s)?/i);
 }
 
+// Confirma que el sitio base levanta y que WordPress responde con contenido visible.
 test('homepage responds and shows WordPress content', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveTitle(/Mi WordPress/i);
   await expect(page.locator('body')).toContainText(/Mi WordPress|Hello world!/i);
 });
 
+// Verifica que la pantalla de login del admin esté accesible antes de tocar flujos más pesados.
 test('wp-admin login page is reachable', async ({ page }) => {
   await page.goto('/wp-login.php');
   await expect(page).toHaveURL(/wp-login\.php/);
@@ -578,6 +580,7 @@ test('wp-admin login page is reachable', async ({ page }) => {
   await expect(page.locator('#user_pass')).toBeVisible();
 });
 
+// Deja listos varios emisores FE para que el resto de los smoke tengan datos reales con qué trabajar.
 test('add factura electronica emisores from WooCommerce settings', async ({ page }, testInfo) => {
   const emitters = await ensureMinimumFacturaElectronicaEmitters(page, 3);
 
@@ -591,6 +594,7 @@ test('add factura electronica emisores from WooCommerce settings', async ({ page
   expect(emitters.length).toBeGreaterThanOrEqual(3);
 });
 
+// Crea un lote de productos con precio y emisor FE aleatorio para poblar el catálogo del entorno de prueba.
 test('add product from wp-admin', async ({ page }, testInfo) => {
   test.setTimeout(120000);
 
@@ -621,6 +625,7 @@ test('add product from wp-admin', async ({ page }, testInfo) => {
   });
 });
 
+// Arma una orden completada con FE usando productos existentes para validar el flujo base de creación.
 test('add completed order with factura electronica from wp-admin', async ({ page }, testInfo) => {
   await createCompletedFacturaOrder(page);
 
@@ -632,6 +637,7 @@ test('add completed order with factura electronica from wp-admin', async ({ page
   });
 });
 
+// Ejecuta FE sobre una orden normal y deja evidencia del estado que reporta el metabox en la orden.
 test('execute factura electronica from order status box', async ({ page }, testInfo) => {
   test.setTimeout(180000);
 
@@ -672,6 +678,7 @@ test('execute factura electronica from order status box', async ({ page }, testI
   });
 });
 
+// Fuerza una orden con productos ligados a emisor default y no-default para revisar el comportamiento mixto.
 test('execute factura electronica with default and non-default emitters', async ({ page }, testInfo) => {
   test.setTimeout(180000);
 
