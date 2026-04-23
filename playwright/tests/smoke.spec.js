@@ -447,15 +447,19 @@ test('execute factura electronica from order status box', async ({ page }, testI
 
   const documentsReady = await waitForFacturaDocuments(page, facturaStatusBox, 120000);
 
-  if (documentsReady) {
-    await expect(facturaStatusBox).toContainText(/Documentos Generados:/i);
-    await expect(facturaStatusBox).toContainText(/PDF Factura/i);
-    await expect(facturaStatusBox).toContainText(/XML Factura/i);
-    await expect(facturaStatusBox).toContainText(/XML Mensaje Receptor/i);
-    await page.waitForTimeout(10000);
-    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
-    await expect(facturaStatusBox).toBeVisible().catch(() => null);
-  }
+  await expect(documentsReady, 'FE documents were not generated in time for screenshot evidence.').toBeTruthy();
+  await expect(facturaStatusBox).toContainText(/Documentos Generados:/i);
+  await expect(facturaStatusBox).toContainText(/PDF Factura/i);
+  await expect(facturaStatusBox).toContainText(/XML Factura/i);
+  await expect(facturaStatusBox).toContainText(/XML Mensaje Receptor/i);
+
+  await page.waitForTimeout(15000);
+  await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
+  await expect(facturaStatusBox).toBeVisible();
+  await expect(facturaStatusBox).toContainText(/Documentos Generados:/i);
+  await expect(facturaStatusBox).toContainText(/PDF Factura/i);
+  await expect(facturaStatusBox).toContainText(/XML Factura/i);
+  await expect(facturaStatusBox).toContainText(/XML Mensaje Receptor/i);
 
   await facturaStatusBox.scrollIntoViewIfNeeded();
 
@@ -465,10 +469,6 @@ test('execute factura electronica from order status box', async ({ page }, testI
     path: statusBoxScreenshotPath,
     contentType: 'image/png',
   });
-
-  await page.waitForTimeout(15000);
-  await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
-  await expect(facturaStatusBox).toBeVisible().catch(() => null);
 
   const fullPageScreenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
   await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
