@@ -403,6 +403,8 @@ test('add factura electronica emisores from WooCommerce settings', async ({ page
 });
 
 test('add product from wp-admin', async ({ page }, testInfo) => {
+  test.setTimeout(120000);
+
   const emitters = await ensureMinimumFacturaElectronicaEmitters(page, 3);
   const productCount = Math.floor(Math.random() * 3) + 5;
 
@@ -433,21 +435,30 @@ test('add product from wp-admin', async ({ page }, testInfo) => {
     const pricingTabButton = page.getByRole('button', { name: /pricing|general/i }).first();
     if (!(await regularPriceField.isVisible().catch(() => false)) && await pricingTabButton.isVisible().catch(() => false)) {
       await pricingTabButton.click();
-      if (await regularPriceField.isVisible().catch(() => false)) {
-        await regularPriceField.fill(regularPrice);
-      }
     }
 
+    await expect(regularPriceField).toBeVisible({ timeout: 15_000 });
+    await regularPriceField.fill(regularPrice);
+    await expect(regularPriceField).toHaveValue(regularPrice);
+
     const productEmitterField = page.locator('#fe_woo_emisor_id').first();
-    await expect(productEmitterField).toBeVisible();
+    await expect(productEmitterField).toBeVisible({ timeout: 15_000 });
+    await expect
+      .poll(async () => productEmitterField.locator('option').count(), { timeout: 15_000 })
+      .toBeGreaterThan(1);
+    await expect(productEmitterField.locator(`option[value="${randomEmitter.id}"]`)).toHaveCount(1);
     await productEmitterField.selectOption(randomEmitter.id);
     await expect(productEmitterField).toHaveValue(randomEmitter.id);
 
     const publishButton = page.getByRole('button', { name: /publish/i }).last();
+    await publishButton.scrollIntoViewIfNeeded();
+    await expect(publishButton).toBeEnabled({ timeout: 15_000 });
     await publishButton.click();
 
     const confirmPublishButton = page.getByRole('button', { name: /publish/i }).last();
     if (await confirmPublishButton.isVisible().catch(() => false)) {
+      await confirmPublishButton.scrollIntoViewIfNeeded();
+      await expect(confirmPublishButton).toBeEnabled({ timeout: 15_000 });
       await confirmPublishButton.click();
     }
 
@@ -455,7 +466,7 @@ test('add product from wp-admin', async ({ page }, testInfo) => {
       await completeWpAdminLogin(page);
     }
 
-    await expect(page.locator('body')).toContainText(/published|updated|Product published/i);
+    await expect(page.locator('body')).toContainText(/published|updated|Product published/i, { timeout: 20_000 });
 
     const permalinkField = page.locator('#sample-permalink a, .editor-post-permalink__link').first();
     if (await permalinkField.isVisible().catch(() => false)) {
