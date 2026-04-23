@@ -445,6 +445,97 @@ async function createCompletedFacturaOrder(page, options = {}) {
   return { productNames: addedProducts.map((product) => product.name) };
 }
 
+async function createCompletedFacturaOrderWithMixedEmitters(page) {
+  const emitters = await ensureMinimumFacturaElectronicaEmitters(page, 2);
+  const defaultEmitter = emitters.find((emitter) => emitter.isDefault);
+  const nonDefaultEmitters = emitters.filter((emitter) => !emitter.isDefault);
+
+  if (!defaultEmitter || nonDefaultEmitters.length === 0) {
+    throw new Error('Could not prepare mixed FE emitters for the execute smoke test.');
+  }
+
+  const unique = Date.now();
+  const productDefinitions = [
+    {
+      productName: `Execute FE Default Product ${unique}-1`,
+      regularPrice: '15',
+      emitterId: defaultEmitter.id,
+      description: `Execute factura product using default emitter ${defaultEmitter.name}.`,
+    },
+    {
+      productName: `Execute FE Secondary Product ${unique}-2`,
+      regularPrice: '20',
+      emitterId: nonDefaultEmitters[0].id,
+      description: `Execute factura product using non-default emitter ${nonDefaultEmitters[0].name}.`,
+    },
+  ];
+
+  for (const productDefinition of productDefinitions) {
+    await createProductWithFacturaEmitter(page, productDefinition);
+  }
+
+  const cedulaFisica = '114440852';
+  await gotoAdminPage(page, '/wp-admin/admin.php?page=wc-orders&action=new', /page=wc-orders&action=new/);
+  await expect(page.locator('#order_status')).toBeVisible();
+  await expect(page.locator('body')).toContainText(/Add new order|Order actions|Order data|Nueva orden/i);
+
+  await page.locator('#order_status').selectOption('wc-completed');
+  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
+
+  const requireFacturaCheckbox = page.locator('#fe_woo_require_factura');
+  await expect(requireFacturaCheckbox).toBeVisible();
+  if (!(await requireFacturaCheckbox.isChecked())) {
+    await requireFacturaCheckbox.check();
+  }
+
+  const idTypeField = page.locator('#fe_woo_id_type');
+  if (await idTypeField.isVisible().catch(() => false)) {
+    const cedulaFisicaOption = await idTypeField.locator('option').evaluateAll((nodes) => {
+      const match = nodes.find((node) => /Cédula Física/i.test(node.textContent || ''));
+      return match ? match.value : '';
+    });
+
+    if (!cedulaFisicaOption) {
+      throw new Error('Could not find the "Cédula Física" option in the FE identification type select.');
+    }
+
+    await idTypeField.selectOption(cedulaFisicaOption);
+  }
+
+  await page.locator('#fe_woo_id_number').fill(cedulaFisica);
+  await page.locator('#fe_woo_invoice_email').fill(`playwright-order-${unique}@example.com`);
+  await page.locator('#fe_woo_phone').fill('22223333');
+  await page.locator('#fe_woo_activity_code').fill('1234.5');
+  await expect(page.locator('#fe_woo_activity_code')).toHaveValue(/^\d{4}\.\d$/);
+
+  const addedProducts = [];
+  for (const productDefinition of productDefinitions) {
+    const quantity = Math.floor(Math.random() * 10) + 1;
+    const addedProductName = await addExistingProductToOrder(page, productDefinition.productName, quantity);
+    addedProducts.push({ name: addedProductName, quantity });
+  }
+
+  const createOrderButton = page.getByRole('button', { name: /^Create$/i }).last();
+  await expect(createOrderButton).toBeVisible();
+  await Promise.all([
+    page.waitForLoadState('domcontentloaded'),
+    createOrderButton.click(),
+  ]);
+
+  await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+/, { timeout: 20_000 });
+  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
+  await expect(page.locator('#fe_woo_require_factura')).toBeChecked();
+  for (const addedProduct of addedProducts) {
+    await expect(page.locator('body')).toContainText(addedProduct.name);
+  }
+
+  return {
+    productNames: addedProducts.map((product) => product.name),
+    defaultEmitterName: defaultEmitter.name,
+    nonDefaultEmitterName: nonDefaultEmitters[0].name,
+  };
+}
+
 test('homepage responds and shows WordPress content', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveTitle(/Mi WordPress/i);
@@ -555,6 +646,55 @@ test('execute factura electronica from order status box', async ({ page }, testI
   const fullPageScreenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
   await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
   await testInfo.attach('wc-order-execute-full-page', {
+    path: fullPageScreenshotPath,
+    contentType: 'image/png',
+  });
+});
+
+test('execute factura electronica with default and non-default emitters', async ({ page }, testInfo) => {
+  test.setTimeout(180000);
+
+  const orderInfo = await createCompletedFacturaOrderWithMixedEmitters(page);
+
+  const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
+  await expect(ejecutarButton).toBeVisible();
+  await ejecutarButton.click();
+
+  await page.waitForFunction(() => {
+    return Boolean(
+      document.querySelector('.fe-woo-notice') ||
+      !document.querySelector('.fe-woo-ejecutar-factura')
+    );
+  }, { timeout: 20_000 });
+
+  await page.waitForTimeout(2500).catch(() => null);
+  await page.waitForLoadState('domcontentloaded').catch(() => null);
+
+  const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+  await expect(facturaStatusBox).toBeVisible();
+  await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
+  await expect(facturaStatusBox).not.toContainText(/EN COLA/i);
+  await expect(facturaStatusBox).toContainText(/Clave:/i);
+  await expect(facturaStatusBox).toContainText(/Estado Local:/i);
+  await expect(facturaStatusBox).toContainText(/Enviada/i);
+  await expect(facturaStatusBox).toContainText(/Estado Hacienda:/i);
+  await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
+  await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
+
+  for (const productName of orderInfo.productNames) {
+    await expect(page.locator('body')).toContainText(productName);
+  }
+
+  const statusBoxScreenshotPath = testInfo.outputPath('wc-order-execute-mixed-emitters-status-box.png');
+  await facturaStatusBox.screenshot({ path: statusBoxScreenshotPath });
+  await testInfo.attach('wc-order-execute-mixed-emitters-status-box', {
+    path: statusBoxScreenshotPath,
+    contentType: 'image/png',
+  });
+
+  const fullPageScreenshotPath = testInfo.outputPath('wc-order-execute-mixed-emitters-full-page.png');
+  await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
+  await testInfo.attach('wc-order-execute-mixed-emitters-full-page', {
     path: fullPageScreenshotPath,
     contentType: 'image/png',
   });
