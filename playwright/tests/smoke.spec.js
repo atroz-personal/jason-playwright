@@ -262,6 +262,70 @@ async function getExistingProductNames(page) {
   return productNames;
 }
 
+async function createProductWithFacturaEmitter(page, { productName, regularPrice, emitterId, description }) {
+  await gotoAdminPage(page, '/wp-admin/post-new.php?post_type=product', /post-new\.php\?post_type=product/);
+  await expect(page.locator('body')).toContainText(/Add new product|Create product|New product|Edit product/i);
+
+  const titleField = page.locator('input[name="post_title"], .editor-post-title__input, h1[contenteditable="true"]').first();
+  await titleField.click();
+  await titleField.fill(productName);
+
+  const descriptionField = page.locator('[aria-label="Add description"], [role="textbox"][contenteditable="true"]').first();
+  if (description && await descriptionField.isVisible().catch(() => false)) {
+    await descriptionField.click();
+    await descriptionField.fill(description);
+  }
+
+  const regularPriceField = page.locator('input[name="_regular_price"], #_regular_price').first();
+  const pricingTabButton = page.getByRole('button', { name: /pricing|general/i }).first();
+  if (!(await regularPriceField.isVisible().catch(() => false)) && await pricingTabButton.isVisible().catch(() => false)) {
+    await pricingTabButton.click();
+  }
+
+  await expect(regularPriceField).toBeVisible({ timeout: 15_000 });
+  await regularPriceField.fill(regularPrice);
+  await expect(regularPriceField).toHaveValue(regularPrice);
+
+  const productEmitterField = page.locator('#fe_woo_emisor_id').first();
+  await expect(productEmitterField).toBeVisible({ timeout: 15_000 });
+  await expect
+    .poll(async () => productEmitterField.locator('option').count(), { timeout: 15_000 })
+    .toBeGreaterThan(1);
+  await expect(productEmitterField.locator(`option[value="${emitterId}"]`)).toHaveCount(1);
+  await productEmitterField.selectOption(emitterId);
+  await expect(productEmitterField).toHaveValue(emitterId);
+
+  const publishButton = page.getByRole('button', { name: /publish/i }).last();
+  await publishButton.scrollIntoViewIfNeeded();
+  await expect(publishButton).toBeEnabled({ timeout: 15_000 });
+  await publishButton.click();
+
+  const confirmPublishButton = page.getByRole('button', { name: /publish/i }).last();
+  if (await confirmPublishButton.isVisible().catch(() => false)) {
+    await confirmPublishButton.scrollIntoViewIfNeeded();
+    await expect(confirmPublishButton).toBeEnabled({ timeout: 15_000 });
+    await confirmPublishButton.click();
+  }
+
+  if (/wp-login\.php/.test(page.url())) {
+    await completeWpAdminLogin(page);
+  }
+
+  await gotoAdminPage(
+    page,
+    `/wp-admin/edit.php?post_type=product&s=${encodeURIComponent(productName)}`,
+    /edit\.php\?post_type=product/
+  );
+
+  const productRowLink = page.locator('.row-title', { hasText: productName }).first();
+  await expect(productRowLink).toBeVisible({ timeout: 20_000 });
+
+  const productRow = page.locator('#the-list tr').filter({ has: productRowLink }).first();
+  await expect(productRow).toContainText(new RegExp(`${Number(regularPrice).toFixed(2)}`));
+
+  return productName;
+}
+
 async function addExistingProductToOrder(page, productName, quantity) {
   await page.getByRole('button', { name: /Add item\(s\)/i }).click();
   await page.getByRole('button', { name: /Add product\(s\)/i }).click();
@@ -310,18 +374,41 @@ async function addExistingProductToOrder(page, productName, quantity) {
 }
 
 async function createCompletedFacturaOrder(page, options = {}) {
-  const { itemCount } = options;
-  await ensureDefaultFacturaElectronicaEmisor(page);
+  const { itemCount, minItemCount, maxItemCount, requireDistinctEmitters = false } = options;
+  const emitters = requireDistinctEmitters
+    ? await ensureMinimumFacturaElectronicaEmitters(page, maxItemCount || itemCount || 3)
+    : (await ensureDefaultFacturaElectronicaEmisor(page), null);
 
-  const productNames = await getExistingProductNames(page);
-  const shuffledProductNames = [...productNames].sort(() => Math.random() - 0.5);
+  const randomItemCount = Math.floor(Math.random() * ((maxItemCount || 3) - (minItemCount || 1) + 1)) + (minItemCount || 1);
   const selectedProductCount = Math.min(
-    shuffledProductNames.length,
-    itemCount || (Math.floor(Math.random() * 3) + 1)
+    requireDistinctEmitters ? emitters.length : (await getExistingProductNames(page)).length,
+    itemCount || randomItemCount
   );
-  const selectedProducts = shuffledProductNames.slice(0, selectedProductCount);
   const unique = Date.now();
   const cedulaFisica = '114440852';
+
+  let selectedProducts;
+  if (requireDistinctEmitters) {
+    const selectedEmitters = [...emitters].sort(() => Math.random() - 0.5).slice(0, selectedProductCount);
+    selectedProducts = [];
+    for (let index = 0; index < selectedEmitters.length; index += 1) {
+      const emitter = selectedEmitters[index];
+      const productName = `Execute FE Product ${unique}-${index + 1}`;
+      const regularPrice = String(10 + index * 5);
+      await createProductWithFacturaEmitter(page, {
+        productName,
+        regularPrice,
+        emitterId: emitter.id,
+        description: `Execute factura product ${index + 1} for emitter ${emitter.name}.`,
+      });
+      selectedProducts.push(productName);
+    }
+  } else {
+    await ensureDefaultFacturaElectronicaEmisor(page);
+    const productNames = await getExistingProductNames(page);
+    const shuffledProductNames = [...productNames].sort(() => Math.random() - 0.5);
+    selectedProducts = shuffledProductNames.slice(0, selectedProductCount);
+  }
 
   await gotoAdminPage(page, '/wp-admin/admin.php?page=wc-orders&action=new', /page=wc-orders&action=new/);
   await expect(page.locator('#order_status')).toBeVisible();
@@ -417,70 +504,12 @@ test('add product from wp-admin', async ({ page }, testInfo) => {
     const productName = `Smoke Product ${unique}`;
     const regularPrice = String(10 + index * 5);
     const randomEmitter = emitters[Math.floor(Math.random() * emitters.length)];
-
-    await gotoAdminPage(page, '/wp-admin/post-new.php?post_type=product', /post-new\.php\?post_type=product/);
-    await expect(page.locator('body')).toContainText(/Add new product|Create product|New product|Edit product/i);
-
-    const titleField = page.locator('input[name="post_title"], .editor-post-title__input, h1[contenteditable="true"]').first();
-    await titleField.click();
-    await titleField.fill(productName);
-
-    const descriptionField = page.locator('[aria-label="Add description"], [role="textbox"][contenteditable="true"]').first();
-    if (await descriptionField.isVisible().catch(() => false)) {
-      await descriptionField.click();
-      await descriptionField.fill(`Product ${index + 1} created by Playwright smoke test.`);
-    }
-
-    const regularPriceField = page.locator('input[name="_regular_price"], #_regular_price').first();
-    if (await regularPriceField.isVisible().catch(() => false)) {
-      await regularPriceField.fill(regularPrice);
-    }
-
-    const pricingTabButton = page.getByRole('button', { name: /pricing|general/i }).first();
-    if (!(await regularPriceField.isVisible().catch(() => false)) && await pricingTabButton.isVisible().catch(() => false)) {
-      await pricingTabButton.click();
-    }
-
-    await expect(regularPriceField).toBeVisible({ timeout: 15_000 });
-    await regularPriceField.fill(regularPrice);
-    await expect(regularPriceField).toHaveValue(regularPrice);
-
-    const productEmitterField = page.locator('#fe_woo_emisor_id').first();
-    await expect(productEmitterField).toBeVisible({ timeout: 15_000 });
-    await expect
-      .poll(async () => productEmitterField.locator('option').count(), { timeout: 15_000 })
-      .toBeGreaterThan(1);
-    await expect(productEmitterField.locator(`option[value="${randomEmitter.id}"]`)).toHaveCount(1);
-    await productEmitterField.selectOption(randomEmitter.id);
-    await expect(productEmitterField).toHaveValue(randomEmitter.id);
-
-    const publishButton = page.getByRole('button', { name: /publish/i }).last();
-    await publishButton.scrollIntoViewIfNeeded();
-    await expect(publishButton).toBeEnabled({ timeout: 15_000 });
-    await publishButton.click();
-
-    const confirmPublishButton = page.getByRole('button', { name: /publish/i }).last();
-    if (await confirmPublishButton.isVisible().catch(() => false)) {
-      await confirmPublishButton.scrollIntoViewIfNeeded();
-      await expect(confirmPublishButton).toBeEnabled({ timeout: 15_000 });
-      await confirmPublishButton.click();
-    }
-
-    if (/wp-login\.php/.test(page.url())) {
-      await completeWpAdminLogin(page);
-    }
-
-    await gotoAdminPage(
-      page,
-      `/wp-admin/edit.php?post_type=product&s=${encodeURIComponent(productName)}`,
-      /edit\.php\?post_type=product/
-    );
-
-    const productRowLink = page.locator('.row-title', { hasText: productName }).first();
-    await expect(productRowLink).toBeVisible({ timeout: 20_000 });
-
-    const productRow = page.locator('#the-list tr').filter({ has: productRowLink }).first();
-    await expect(productRow).toContainText(new RegExp(`${Number(regularPrice).toFixed(2)}`));
+    await createProductWithFacturaEmitter(page, {
+      productName,
+      regularPrice,
+      emitterId: randomEmitter.id,
+      description: `Product ${index + 1} created by Playwright smoke test.`,
+    });
   }
 
   await gotoAdminPage(page, '/wp-admin/edit.php?post_type=product', /edit\.php\?post_type=product/);
@@ -508,7 +537,7 @@ test('add completed order with factura electronica from wp-admin', async ({ page
 test('execute factura electronica from order status box', async ({ page }, testInfo) => {
   test.setTimeout(180000);
 
-  await createCompletedFacturaOrder(page, { itemCount: 3 });
+  await createCompletedFacturaOrder(page, { minItemCount: 1, maxItemCount: 10, requireDistinctEmitters: true });
 
   const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
   await expect(ejecutarButton).toBeVisible();
