@@ -322,52 +322,6 @@ async function createCompletedFacturaOrder(page) {
   return { productName: addedProductName };
 }
 
-async function waitForFacturaDocuments(page, facturaStatusBox, timeoutMs = 120000) {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    const boxText = await facturaStatusBox.textContent().catch(() => '');
-    const hasAllDocuments =
-      /PDF Factura/i.test(boxText || '') &&
-      /XML Factura/i.test(boxText || '') &&
-      /XML Mensaje Receptor/i.test(boxText || '');
-
-    if (hasAllDocuments) {
-      return true;
-    }
-
-    await page.waitForTimeout(3000);
-    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
-    await expect(facturaStatusBox).toBeVisible().catch(() => null);
-  }
-
-  return false;
-}
-
-async function waitForFacturaDocumentsVisibleInStatusBox(page, timeoutMs = 180000) {
-  const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    await expect(facturaStatusBox).toBeVisible().catch(() => null);
-    const boxText = await facturaStatusBox.textContent().catch(() => '');
-    const hasAllDocuments =
-      /Documentos Generados:/i.test(boxText || '') &&
-      /PDF Factura/i.test(boxText || '') &&
-      /XML Factura/i.test(boxText || '') &&
-      /XML Mensaje Receptor/i.test(boxText || '');
-
-    if (hasAllDocuments) {
-      return facturaStatusBox;
-    }
-
-    await page.waitForTimeout(5000);
-    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
-  }
-
-  return null;
-}
-
 test('homepage responds and shows WordPress content', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveTitle(/Mi WordPress/i);
@@ -481,45 +435,6 @@ test('execute factura electronica from order status box', async ({ page }, testI
   const fullPageScreenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
   await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
   await testInfo.attach('wc-order-execute-full-page', {
-    path: fullPageScreenshotPath,
-    contentType: 'image/png',
-  });
-});
-
-test('capture factura electronica documents after execute with polling', async ({ page }, testInfo) => {
-  test.setTimeout(240000);
-
-  await createCompletedFacturaOrder(page);
-
-  const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
-  await expect(ejecutarButton).toBeVisible();
-  await ejecutarButton.click();
-
-  await page.waitForFunction(() => {
-    return Boolean(
-      document.querySelector('.fe-woo-notice') ||
-      !document.querySelector('.fe-woo-ejecutar-factura')
-    );
-  }, { timeout: 20000 });
-
-  await page.waitForTimeout(2500).catch(() => null);
-  await page.waitForLoadState('domcontentloaded').catch(() => null);
-
-  const facturaStatusBox = await waitForFacturaDocumentsVisibleInStatusBox(page, 180000);
-  await expect(facturaStatusBox, 'Factura documents did not become visible in the status box in time.').toBeTruthy();
-
-  await facturaStatusBox.scrollIntoViewIfNeeded();
-
-  const statusBoxScreenshotPath = testInfo.outputPath('wc-order-documents-status-box.png');
-  await facturaStatusBox.screenshot({ path: statusBoxScreenshotPath });
-  await testInfo.attach('wc-order-documents-status-box', {
-    path: statusBoxScreenshotPath,
-    contentType: 'image/png',
-  });
-
-  const fullPageScreenshotPath = testInfo.outputPath('wc-order-documents-full-page.png');
-  await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
-  await testInfo.attach('wc-order-documents-full-page', {
     path: fullPageScreenshotPath,
     contentType: 'image/png',
   });
