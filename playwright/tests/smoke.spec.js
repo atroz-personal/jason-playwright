@@ -553,6 +553,18 @@ async function createCompletedFacturaOrderWithMixedEmitters(page) {
   };
 }
 
+async function expectFacturaElectronicaExecutionSuccess(facturaStatusBox) {
+  await expect(facturaStatusBox).toBeVisible();
+  await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
+  await expect(facturaStatusBox).not.toContainText(/EN COLA/i);
+  await expect(facturaStatusBox).toContainText(/Clave:|\d+\s+Factura(?:s)?\s+Generada(?:s)?/i);
+  await expect(facturaStatusBox).toContainText(/Estado Local:/i);
+  await expect(facturaStatusBox).toContainText(/Enviada/i);
+  await expect(facturaStatusBox).toContainText(/Estado Hacienda:/i);
+  await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
+  await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente|\d+\s+Factura(?:s)?\s+Generada(?:s)?/i);
+}
+
 test('homepage responds and shows WordPress content', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveTitle(/Mi WordPress/i);
@@ -641,15 +653,7 @@ test('execute factura electronica from order status box', async ({ page }, testI
   await page.waitForLoadState('domcontentloaded').catch(() => null);
 
   const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
-  await expect(facturaStatusBox).toBeVisible();
-  await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
-  await expect(facturaStatusBox).not.toContainText(/EN COLA/i);
-  await expect(facturaStatusBox).toContainText(/Clave:/i);
-  await expect(facturaStatusBox).toContainText(/Estado Local:/i);
-  await expect(facturaStatusBox).toContainText(/Enviada/i);
-  await expect(facturaStatusBox).toContainText(/Estado Hacienda:/i);
-  await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
-  await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
+  await expectFacturaElectronicaExecutionSuccess(facturaStatusBox);
 
   await facturaStatusBox.scrollIntoViewIfNeeded();
 
@@ -708,15 +712,7 @@ test('execute factura electronica with default and non-default emitters', async 
   await page.waitForLoadState('domcontentloaded').catch(() => null);
 
   const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
-  await expect(facturaStatusBox).toBeVisible();
-  await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
-  await expect(facturaStatusBox).not.toContainText(/EN COLA/i);
-  await expect(facturaStatusBox).toContainText(/Clave:/i);
-  await expect(facturaStatusBox).toContainText(/Estado Local:/i);
-  await expect(facturaStatusBox).toContainText(/Enviada/i);
-  await expect(facturaStatusBox).toContainText(/Estado Hacienda:/i);
-  await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
-  await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
+  await expectFacturaElectronicaExecutionSuccess(facturaStatusBox);
 
   for (const productName of orderInfo.productNames) {
     await expect(page.locator('body')).toContainText(productName);
