@@ -309,12 +309,16 @@ async function addExistingProductToOrder(page, productName, quantity) {
   return addedProductName;
 }
 
-async function createCompletedFacturaOrder(page) {
+async function createCompletedFacturaOrder(page, options = {}) {
+  const { itemCount } = options;
   await ensureDefaultFacturaElectronicaEmisor(page);
 
   const productNames = await getExistingProductNames(page);
   const shuffledProductNames = [...productNames].sort(() => Math.random() - 0.5);
-  const selectedProductCount = Math.min(shuffledProductNames.length, Math.floor(Math.random() * 3) + 1);
+  const selectedProductCount = Math.min(
+    shuffledProductNames.length,
+    itemCount || (Math.floor(Math.random() * 3) + 1)
+  );
   const selectedProducts = shuffledProductNames.slice(0, selectedProductCount);
   const unique = Date.now();
   const cedulaFisica = '114440852';
@@ -504,7 +508,7 @@ test('add completed order with factura electronica from wp-admin', async ({ page
 test('execute factura electronica from order status box', async ({ page }, testInfo) => {
   test.setTimeout(180000);
 
-  await createCompletedFacturaOrder(page);
+  await createCompletedFacturaOrder(page, { itemCount: 3 });
 
   const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
   await expect(ejecutarButton).toBeVisible();
