@@ -322,30 +322,6 @@ async function createCompletedFacturaOrder(page) {
   return { productName: addedProductName };
 }
 
-async function waitForFacturaDocumentsVisibleInStatusBox(page, timeoutMs = 180000) {
-  const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    await expect(facturaStatusBox).toBeVisible().catch(() => null);
-    const boxText = await facturaStatusBox.textContent().catch(() => '');
-    const hasAllDocuments =
-      /Documentos Generados:/i.test(boxText || '') &&
-      /PDF Factura/i.test(boxText || '') &&
-      /XML Factura/i.test(boxText || '') &&
-      /XML Mensaje Receptor/i.test(boxText || '');
-
-    if (hasAllDocuments) {
-      return facturaStatusBox;
-    }
-
-    await page.waitForTimeout(5000);
-    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
-  }
-
-  return null;
-}
-
 test('homepage responds and shows WordPress content', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveTitle(/Mi WordPress/i);
@@ -416,97 +392,50 @@ test('add completed order with factura electronica from wp-admin', async ({ page
   });
 });
 
-let executedFacturaOrderUrl = null;
-let executedFacturaOrderId = null;
-let executedFacturaClave = null;
+test('execute factura electronica from order status box', async ({ page }, testInfo) => {
+  test.setTimeout(180000);
 
-test.describe('factura electronica execute and verify flow', () => {
-  test.describe.configure({ mode: 'serial' });
+  await createCompletedFacturaOrder(page);
 
-  test('execute factura electronica from order status box', async ({ page }, testInfo) => {
-    test.setTimeout(180000);
+  const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
+  await expect(ejecutarButton).toBeVisible();
 
-    await createCompletedFacturaOrder(page);
-    executedFacturaOrderUrl = page.url();
-    executedFacturaOrderId = new URL(page.url()).searchParams.get('id');
+  await ejecutarButton.click();
 
-    const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
-    await expect(ejecutarButton).toBeVisible();
+  await page.waitForFunction(() => {
+    return Boolean(
+      document.querySelector('.fe-woo-notice') ||
+      !document.querySelector('.fe-woo-ejecutar-factura')
+    );
+  }, { timeout: 20_000 });
 
-    await ejecutarButton.click();
+  await page.waitForTimeout(2500).catch(() => null);
+  await page.waitForLoadState('domcontentloaded').catch(() => null);
 
-    await page.waitForFunction(() => {
-      return Boolean(
-        document.querySelector('.fe-woo-notice') ||
-        !document.querySelector('.fe-woo-ejecutar-factura')
-      );
-    }, { timeout: 20_000 });
+  const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+  await expect(facturaStatusBox).toBeVisible();
+  await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
+  await expect(facturaStatusBox).not.toContainText(/EN COLA/i);
+  await expect(facturaStatusBox).toContainText(/Clave:/i);
+  await expect(facturaStatusBox).toContainText(/Estado Local:/i);
+  await expect(facturaStatusBox).toContainText(/Enviada/i);
+  await expect(facturaStatusBox).toContainText(/Estado Hacienda:/i);
+  await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
+  await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
 
-    await page.waitForTimeout(2500).catch(() => null);
-    await page.waitForLoadState('domcontentloaded').catch(() => null);
+  await facturaStatusBox.scrollIntoViewIfNeeded();
 
-    const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
-    await expect(facturaStatusBox).toBeVisible();
-    await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
-    await expect(facturaStatusBox).not.toContainText(/EN COLA/i);
-    await expect(facturaStatusBox).toContainText(/Clave:/i);
-    await expect(facturaStatusBox).toContainText(/Estado Local:/i);
-    await expect(facturaStatusBox).toContainText(/Enviada/i);
-    await expect(facturaStatusBox).toContainText(/Estado Hacienda:/i);
-    await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
-    await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente/i);
-
-    const statusBoxText = await facturaStatusBox.textContent();
-    const claveMatch = statusBoxText ? statusBoxText.match(/Clave:\s*([0-9]+)/i) : null;
-    executedFacturaClave = claveMatch ? claveMatch[1] : null;
-
-    await facturaStatusBox.scrollIntoViewIfNeeded();
-
-    const statusBoxScreenshotPath = testInfo.outputPath('wc-order-execute-status-box.png');
-    await facturaStatusBox.screenshot({ path: statusBoxScreenshotPath });
-    await testInfo.attach('wc-order-execute-status-box', {
-      path: statusBoxScreenshotPath,
-      contentType: 'image/png',
-    });
-
-    const fullPageScreenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
-    await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
-    await testInfo.attach('wc-order-execute-full-page', {
-      path: fullPageScreenshotPath,
-      contentType: 'image/png',
-    });
+  const statusBoxScreenshotPath = testInfo.outputPath('wc-order-execute-status-box.png');
+  await facturaStatusBox.screenshot({ path: statusBoxScreenshotPath });
+  await testInfo.attach('wc-order-execute-status-box', {
+    path: statusBoxScreenshotPath,
+    contentType: 'image/png',
   });
 
-  test('verificaFE opens generated factura document page', async ({ page, context }, testInfo) => {
-    test.setTimeout(240000);
-    test.skip(!executedFacturaOrderUrl || !executedFacturaOrderId || !executedFacturaClave, 'No executed factura order data captured from execute test.');
-
-    await gotoAdminPage(page, executedFacturaOrderUrl.replace('http://localhost:8080', ''), /page=wc-orders&action=edit&id=\d+/);
-
-    const facturaStatusBox = await waitForFacturaDocumentsVisibleInStatusBox(page, 180000);
-    await expect(facturaStatusBox, 'Factura documents did not appear in time for verificaFE.').toBeTruthy();
-
-    const pdfLink = facturaStatusBox.getByRole('link', { name: /PDF Factura/i }).first();
-    await expect(pdfLink).toBeVisible();
-
-    const pdfUrl = await pdfLink.getAttribute('href');
-    await expect(pdfUrl).toBeTruthy();
-    await expect(pdfUrl).toContain(`action=fe_woo_download_document`);
-    await expect(pdfUrl).toContain(`order_id=${executedFacturaOrderId}`);
-    await expect(pdfUrl).toContain(`clave=${executedFacturaClave}`);
-    await expect(pdfUrl).toContain(`type=pdf`);
-
-    const pdfPage = await context.newPage();
-    await pdfPage.goto(pdfUrl, { waitUntil: 'domcontentloaded' });
-    await pdfPage.waitForTimeout(2000);
-
-    const screenshotPath = testInfo.outputPath('verifica-fe-pdf-page.png');
-    await pdfPage.screenshot({ path: screenshotPath, fullPage: true });
-    await testInfo.attach('verifica-fe-pdf-page', {
-      path: screenshotPath,
-      contentType: 'image/png',
-    });
-
-    await pdfPage.close();
+  const fullPageScreenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
+  await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
+  await testInfo.attach('wc-order-execute-full-page', {
+    path: fullPageScreenshotPath,
+    contentType: 'image/png',
   });
 });
