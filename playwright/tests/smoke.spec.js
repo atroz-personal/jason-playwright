@@ -172,12 +172,7 @@ async function createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault 
   }
 }
 
-async function ensureDefaultFacturaElectronicaEmisor(page) {
-  test.skip(
-    !feApiUser || !feApiPassword || !feCertificatePath || !feCertificatePin,
-    'Factura Electronica test requires FE_API_USERNAME, FE_API_PASSWORD, FE_CERTIFICATE_PATH, and FE_CERTIFICATE_PIN.'
-  );
-
+async function getFacturaElectronicaEmitters(page) {
   await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe');
 
   if (/wp-login\.php/.test(page.url())) {
@@ -193,13 +188,54 @@ async function ensureDefaultFacturaElectronicaEmisor(page) {
   await expect(page).toHaveURL(/page=wc-settings&tab=fe/);
   await expect(page.locator('body')).toContainText(/Configuración FE/i);
 
-  const defaultEmisorIndicators = page.locator('body').getByText(/⭐|por defecto|emisor padre/i);
-  const hasDefaultEmisor = (await defaultEmisorIndicators.count().catch(() => 0)) > 0;
+  const emitterRows = page.locator('tr[data-emisor-id]');
+  const emitterCount = await emitterRows.count();
+
+  if (emitterCount === 0) {
+    return [];
+  }
+
+  return emitterRows.evaluateAll((rows) =>
+    rows.map((row) => {
+      const id = row.getAttribute('data-emisor-id') || '';
+      const nameElement = row.querySelector('strong');
+      const rowText = row.textContent || '';
+      return {
+        id,
+        name: (nameElement?.textContent || '').trim(),
+        isDefault: /⭐|Emisor por Defecto|Emisor padre/i.test(rowText),
+      };
+    })
+  );
+}
+
+async function ensureMinimumFacturaElectronicaEmitters(page, minimumCount) {
+  const existingEmitters = await getFacturaElectronicaEmitters(page);
+  const hasDefaultEmitter = existingEmitters.some((emitter) => emitter.isDefault);
+
+  if (!hasDefaultEmitter) {
+    await createFacturaElectronicaEmisor(page, null, { shouldBeDefault: true });
+  }
+
+  let currentEmitters = await getFacturaElectronicaEmitters(page);
+  while (currentEmitters.length < minimumCount) {
+    await createFacturaElectronicaEmisor(page, null, { shouldBeDefault: false });
+    currentEmitters = await getFacturaElectronicaEmitters(page);
+  }
+
+  return currentEmitters;
+}
+
+async function ensureDefaultFacturaElectronicaEmisor(page) {
+  test.skip(
+    !feApiUser || !feApiPassword || !feCertificatePath || !feCertificatePin,
+    'Factura Electronica test requires FE_API_USERNAME, FE_API_PASSWORD, FE_CERTIFICATE_PATH, and FE_CERTIFICATE_PIN.'
+  );
+  const emitters = await ensureMinimumFacturaElectronicaEmitters(page, 1);
+  const hasDefaultEmisor = emitters.some((emitter) => emitter.isDefault);
 
   if (!hasDefaultEmisor) {
-    await createFacturaElectronicaEmisor(page, null, { shouldBeDefault: true });
-    await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe');
-    await expect(page).toHaveURL(/page=wc-settings&tab=fe/);
+    throw new Error('A default Factura Electronica emisor could not be ensured for the test environment.');
   }
 }
 
@@ -349,13 +385,28 @@ test('wp-admin login page is reachable', async ({ page }) => {
   await expect(page.locator('#user_pass')).toBeVisible();
 });
 
+test('add factura electronica emisores from WooCommerce settings', async ({ page }, testInfo) => {
+  const emitters = await ensureMinimumFacturaElectronicaEmitters(page, 3);
+
+  const screenshotPath = testInfo.outputPath('fe-emitters-full-page.png');
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+  await testInfo.attach('fe-emitters-full-page', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
+
+  expect(emitters.length).toBeGreaterThanOrEqual(3);
+});
+
 test('add product from wp-admin', async ({ page }, testInfo) => {
-  const productCount = Math.floor(Math.random() * 3) + 1;
+  const emitters = await ensureMinimumFacturaElectronicaEmitters(page, 3);
+  const productCount = Math.floor(Math.random() * 3) + 5;
 
   for (let index = 0; index < productCount; index += 1) {
     const unique = `${Date.now()}-${index + 1}`;
     const productName = `Smoke Product ${unique}`;
     const regularPrice = String(10 + index * 5);
+    const randomEmitter = emitters[Math.floor(Math.random() * emitters.length)];
 
     await gotoAdminPage(page, '/wp-admin/post-new.php?post_type=product', /post-new\.php\?post_type=product/);
     await expect(page.locator('body')).toContainText(/Add new product|Create product|New product|Edit product/i);
@@ -383,6 +434,11 @@ test('add product from wp-admin', async ({ page }, testInfo) => {
       }
     }
 
+    const productEmitterField = page.locator('#fe_woo_emisor_id').first();
+    await expect(productEmitterField).toBeVisible();
+    await productEmitterField.selectOption(randomEmitter.id);
+    await expect(productEmitterField).toHaveValue(randomEmitter.id);
+
     const publishButton = page.getByRole('button', { name: /publish/i }).last();
     await publishButton.click();
 
@@ -409,6 +465,8 @@ test('add product from wp-admin', async ({ page }, testInfo) => {
     } else {
       await expect(page.locator('body')).toContainText(new RegExp(regularPrice));
     }
+
+    await expect(productEmitterField).toHaveValue(randomEmitter.id);
   }
 
   await gotoAdminPage(page, '/wp-admin/edit.php?post_type=product', /edit\.php\?post_type=product/);
@@ -420,14 +478,6 @@ test('add product from wp-admin', async ({ page }, testInfo) => {
     path: screenshotPath,
     contentType: 'image/png',
   });
-});
-
-test('add factura electronica emisor from WooCommerce settings', async ({ page }, testInfo) => {
-  await createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault: true });
-});
-
-test('add non-default factura electronica emisor from WooCommerce settings', async ({ page }, testInfo) => {
-  await createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault: false });
 });
 
 test('add completed order with factura electronica from wp-admin', async ({ page }, testInfo) => {
