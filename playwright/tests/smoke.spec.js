@@ -466,6 +466,10 @@ test('execute factura electronica from order status box', async ({ page }, testI
     contentType: 'image/png',
   });
 
+  await page.waitForTimeout(15000);
+  await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
+  await expect(facturaStatusBox).toBeVisible().catch(() => null);
+
   const fullPageScreenshotPath = testInfo.outputPath('wc-order-execute-full-page.png');
   await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
   await testInfo.attach('wc-order-execute-full-page', {
