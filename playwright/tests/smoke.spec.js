@@ -2,6 +2,7 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
 
+// Lee el .env local para que estos smoke también sirvan fuera de CI sin tanta configuración manual.
 function readEnvFile() {
   const envPath = path.resolve(process.cwd(), '.env');
 
@@ -32,10 +33,12 @@ const feApiPassword = process.env.FE_API_PASSWORD || envFile.FE_API_PASSWORD || 
 const feCertificatePath = process.env.FE_CERTIFICATE_PATH || envFile.FE_CERTIFICATE_PATH || '';
 const feCertificatePin = process.env.FE_CERTIFICATE_PIN || envFile.FE_CERTIFICATE_PIN || '';
 
+// Nos ayuda a construir regex seguras cuando buscamos nombres dinámicos en la UI.
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Hace el login completo al wp-admin y valida que la sesión realmente quede arriba.
 async function completeWpAdminLogin(page) {
   await expect(page.locator('#loginform')).toBeVisible();
 
@@ -70,11 +73,13 @@ async function completeWpAdminLogin(page) {
   }
 }
 
+// Shortcut simple para abrir el login del admin cuando hace falta empezar desde cero.
 async function loginToWpAdmin(page) {
   await page.goto('/wp-login.php');
   await completeWpAdminLogin(page);
 }
 
+// Navega a una página del admin y se recupera solo si WordPress nos manda de vuelta al login.
 async function gotoAdminPage(page, adminPath, readyPattern) {
   await page.goto(adminPath);
 
@@ -91,6 +96,7 @@ async function gotoAdminPage(page, adminPath, readyPattern) {
   await expect(page).toHaveURL(readyPattern);
 }
 
+// Crea un emisor FE listo para usarse, incluyendo credenciales, certificado y datos fiscales mínimos.
 async function createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault }) {
   test.skip(
     !feApiUser || !feApiPassword || !feCertificatePath || !feCertificatePin,
@@ -181,6 +187,7 @@ async function createFacturaElectronicaEmisor(page, testInfo, { shouldBeDefault 
   }
 }
 
+// Lee la tabla de emisores FE para saber qué hay disponible en el entorno actual.
 async function getFacturaElectronicaEmitters(page) {
   await page.goto('/wp-admin/admin.php?page=wc-settings&tab=fe');
 
@@ -217,6 +224,7 @@ async function getFacturaElectronicaEmitters(page) {
   );
 }
 
+// Garantiza una base mínima de emisores para que los smoke no dependan del estado previo del ambiente.
 async function ensureMinimumFacturaElectronicaEmitters(page, minimumCount) {
   const existingEmitters = await getFacturaElectronicaEmitters(page);
   const hasDefaultEmitter = existingEmitters.some((emitter) => emitter.isDefault);
@@ -234,6 +242,7 @@ async function ensureMinimumFacturaElectronicaEmitters(page, minimumCount) {
   return currentEmitters;
 }
 
+// Este helper solo se preocupa por asegurar que exista un emisor por defecto utilizable.
 async function ensureDefaultFacturaElectronicaEmisor(page) {
   test.skip(
     !feApiUser || !feApiPassword || !feCertificatePath || !feCertificatePin,
@@ -247,6 +256,7 @@ async function ensureDefaultFacturaElectronicaEmisor(page) {
   }
 }
 
+// Toma los nombres de productos existentes para poder armar órdenes sin depender de fixtures externos.
 async function getExistingProductNames(page) {
   await gotoAdminPage(page, '/wp-admin/edit.php?post_type=product', /edit\.php\?post_type=product/);
 
@@ -266,6 +276,7 @@ async function getExistingProductNames(page) {
   return productNames;
 }
 
+// Crea un producto nuevo y lo deja amarrado a un emisor FE específico desde la pantalla de edición.
 async function createProductWithFacturaEmitter(page, { productName, regularPrice, emitterId, description }) {
   await gotoAdminPage(page, '/wp-admin/post-new.php?post_type=product', /post-new\.php\?post_type=product/);
   await expect(page.locator('body')).toContainText(/Add new product|Create product|New product|Edit product/i);
@@ -335,6 +346,7 @@ async function createProductWithFacturaEmitter(page, { productName, regularPrice
   };
 }
 
+// Agrega un producto ya existente a la orden y ajusta la cantidad desde el modal de WooCommerce.
 async function addExistingProductToOrder(page, productName, quantity) {
   await page.getByRole('button', { name: /Add item\(s\)/i }).click();
   await page.getByRole('button', { name: /Add product\(s\)/i }).click();
@@ -385,6 +397,7 @@ async function addExistingProductToOrder(page, productName, quantity) {
   return addedProductName;
 }
 
+// Arma una orden completada con FE usando productos ya existentes y una cantidad de items configurable.
 async function createCompletedFacturaOrder(page, options = {}) {
   const { itemCount, minItemCount, maxItemCount } = options;
   await ensureDefaultFacturaElectronicaEmisor(page);
@@ -457,6 +470,7 @@ async function createCompletedFacturaOrder(page, options = {}) {
   return { productNames: addedProducts.map((product) => product.name) };
 }
 
+// Este flujo fuerza una orden con mezcla real de emisor default y no-default para cubrir la multi-factura.
 async function createCompletedFacturaOrderWithMixedEmitters(page) {
   const emitters = await ensureMinimumFacturaElectronicaEmitters(page, 2);
   const defaultEmitter = emitters.find((emitter) => emitter.isDefault);
@@ -553,6 +567,7 @@ async function createCompletedFacturaOrderWithMixedEmitters(page) {
   };
 }
 
+// Centraliza la validación del metabox FE para aceptar tanto el flujo simple como el de varias facturas.
 async function expectFacturaElectronicaExecutionSuccess(facturaStatusBox) {
   await expect(facturaStatusBox).toBeVisible();
   await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
