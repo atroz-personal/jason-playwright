@@ -819,23 +819,7 @@ test('execute factura electronica with default and non-default emitters', async 
 test('cancel a completed order with generated factura electronica', async ({ page }, testInfo) => {
   test.setTimeout(120000);
 
-  const orderInfo = await findCompletedOrderWithGeneratedFactura(page);
-  await page.goto(orderInfo.orderUrl);
-
-  const statusSelect = page.locator('#order_status');
-  await expect(statusSelect).toBeVisible();
-  await statusSelect.selectOption('wc-cancelled');
-  await expect(statusSelect).toHaveValue('wc-cancelled');
-
-  const updateButton = page.getByRole('button', { name: /^Update$/i }).first();
-  await expect(updateButton).toBeVisible();
-  await Promise.all([
-    page.waitForLoadState('domcontentloaded'),
-    updateButton.click(),
-  ]);
-
-  await expect(page.locator('#order_status')).toHaveValue('wc-cancelled');
-  await expect(page.locator('body')).toContainText(/Order updated|orden actualizada/i);
+  await prepareCancelledOrderWithGeneratedFactura(page);
 
   const screenshotPath = testInfo.outputPath('wc-order-cancelled-full-page.png');
   await page.screenshot({ path: screenshotPath, fullPage: true });
