@@ -601,13 +601,19 @@ async function findCompletedOrderWithGeneratedFactura(page) {
       continue;
     }
 
-    const orderLink = row.locator('a.row-title, .order-view a, a').first();
-    const href = await orderLink.getAttribute('href').catch(() => null);
-    if (!href) {
+    const orderHref = await row.locator('a').evaluateAll((links) => {
+      const match = links.find((link) => {
+        const href = link.getAttribute('href') || '';
+        return /(?:page=wc-orders&action=edit&id=\d+|post=\d+&action=edit)/.test(href);
+      });
+      return match ? match.getAttribute('href') : '';
+    }).catch(() => '');
+
+    if (!orderHref) {
       continue;
     }
 
-    await page.goto(href);
+    await page.goto(orderHref);
     await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+|post=\d+&action=edit/);
 
     const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
