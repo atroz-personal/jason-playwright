@@ -650,6 +650,38 @@ async function waitForRenderedCreditNotes(page, expectedCount, timeoutMs = 60_00
   throw new Error(`Rendered credit notes did not appear in time. Expected ${expectedCount} notes and at least one visible download button.`);
 }
 
+// Cierra u oculta overlays flotantes del admin para que no tapen la evidencia visual.
+async function dismissFloatingAdminOverlays(page) {
+  const closeButtons = [
+    page.locator('button[aria-label="Dismiss this notice"]').first(),
+    page.locator('button[aria-label="Close dialog"]').first(),
+    page.locator('.woocommerce-task-list__dismiss-button').first(),
+    page.locator('.components-modal__header button').first(),
+  ];
+
+  for (const button of closeButtons) {
+    if (await button.isVisible().catch(() => false)) {
+      await button.click().catch(() => null);
+    }
+  }
+
+  await page.evaluate(() => {
+    const selectors = [
+      '.woocommerce-layout__activity-panel-wrapper',
+      '.woocommerce-embedded-layout__primary .components-snackbar-list',
+      '.components-modal__screen-overlay',
+      '.components-modal__frame',
+      '[style*="position: fixed"] .woocommerce-tour-kit-step',
+    ];
+
+    for (const selector of selectors) {
+      document.querySelectorAll(selector).forEach((element) => {
+        element.remove();
+      });
+    }
+  }).catch(() => null);
+}
+
 // Busca una orden completada que ya tenga evidencia de FE generada para reutilizarla en flujos de cambio de estado.
 async function findCompletedOrderWithGeneratedFactura(page) {
   await gotoAdminPage(page, '/wp-admin/edit.php?post_type=shop_order', /edit\.php\?post_type=shop_order|page=wc-orders/i);
@@ -862,11 +894,19 @@ test('generate credit note for cancelled order with generated factura electronic
 
   const facturaStatusBox = await prepareCancelledOrderWithGeneratedFactura(page);
   await facturaStatusBox.scrollIntoViewIfNeeded();
+  await dismissFloatingAdminOverlays(page);
 
   const beforeScreenshotPath = testInfo.outputPath('wc-order-credit-note-before.png');
   await page.screenshot({ path: beforeScreenshotPath, fullPage: true });
   await testInfo.attach('wc-order-credit-note-before', {
     path: beforeScreenshotPath,
+    contentType: 'image/png',
+  });
+
+  const beforeStatusBoxScreenshotPath = testInfo.outputPath('wc-order-credit-note-before-status-box.png');
+  await facturaStatusBox.screenshot({ path: beforeStatusBoxScreenshotPath });
+  await testInfo.attach('wc-order-credit-note-before-status-box', {
+    path: beforeStatusBoxScreenshotPath,
     contentType: 'image/png',
   });
 
@@ -913,11 +953,22 @@ test('generate credit note for cancelled order with generated factura electronic
   }
 
   await waitForRenderedCreditNotes(page, initialNotaForms);
+  await dismissFloatingAdminOverlays(page);
+
+  const refreshedFacturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+  await refreshedFacturaStatusBox.scrollIntoViewIfNeeded();
 
   const afterScreenshotPath = testInfo.outputPath('wc-order-credit-note-after.png');
   await page.screenshot({ path: afterScreenshotPath, fullPage: true });
   await testInfo.attach('wc-order-credit-note-after', {
     path: afterScreenshotPath,
+    contentType: 'image/png',
+  });
+
+  const afterStatusBoxScreenshotPath = testInfo.outputPath('wc-order-credit-note-after-status-box.png');
+  await refreshedFacturaStatusBox.screenshot({ path: afterStatusBoxScreenshotPath });
+  await testInfo.attach('wc-order-credit-note-after-status-box', {
+    path: afterStatusBoxScreenshotPath,
     contentType: 'image/png',
   });
 });
