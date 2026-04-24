@@ -580,6 +580,49 @@ async function expectFacturaElectronicaExecutionSuccess(facturaStatusBox) {
   await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente|\d+\s+Factura(?:s)?\s+Generada(?:s)?/i);
 }
 
+// Ejecuta FE sobre la orden actual y valida el estado final esperado en el metabox.
+async function executeFacturaOnCurrentOrder(page) {
+  const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
+  await expect(ejecutarButton).toBeVisible();
+  await ejecutarButton.click();
+
+  await page.waitForFunction(() => {
+    return Boolean(
+      document.querySelector('.fe-woo-notice') ||
+      !document.querySelector('.fe-woo-ejecutar-factura')
+    );
+  }, { timeout: 20_000 });
+
+  await page.waitForTimeout(2500).catch(() => null);
+  await page.waitForLoadState('domcontentloaded').catch(() => null);
+
+  const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+  await expectFacturaElectronicaExecutionSuccess(facturaStatusBox);
+  return facturaStatusBox;
+}
+
+// Deja una orden en estado cancelado pero con FE ya generada para probar notas de crédito arriba de datos reales.
+async function prepareCancelledOrderWithGeneratedFactura(page) {
+  await createCompletedFacturaOrder(page, { minItemCount: 1, maxItemCount: 10 });
+  await executeFacturaOnCurrentOrder(page);
+
+  const statusSelect = page.locator('#order_status');
+  await expect(statusSelect).toBeVisible();
+  await statusSelect.selectOption('wc-cancelled');
+  await expect(statusSelect).toHaveValue('wc-cancelled');
+
+  const updateButton = page.getByRole('button', { name: /^Update$/i }).first();
+  await expect(updateButton).toBeVisible();
+  await Promise.all([
+    page.waitForLoadState('domcontentloaded'),
+    updateButton.click(),
+  ]);
+
+  await expect(page.locator('#order_status')).toHaveValue('wc-cancelled');
+  await expect(page.locator('body')).toContainText(/Order updated|orden actualizada/i);
+  return page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+}
+
 // Busca una orden completada que ya tenga evidencia de FE generada para reutilizarla en flujos de cambio de estado.
 async function findCompletedOrderWithGeneratedFactura(page) {
   await gotoAdminPage(page, '/wp-admin/edit.php?post_type=shop_order', /edit\.php\?post_type=shop_order|page=wc-orders/i);
@@ -707,24 +750,7 @@ test('execute factura electronica from order status box', async ({ page }, testI
   test.setTimeout(180000);
 
   await createCompletedFacturaOrder(page, { minItemCount: 1, maxItemCount: 10 });
-
-  const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
-  await expect(ejecutarButton).toBeVisible();
-
-  await ejecutarButton.click();
-
-  await page.waitForFunction(() => {
-    return Boolean(
-      document.querySelector('.fe-woo-notice') ||
-      !document.querySelector('.fe-woo-ejecutar-factura')
-    );
-  }, { timeout: 20_000 });
-
-  await page.waitForTimeout(2500).catch(() => null);
-  await page.waitForLoadState('domcontentloaded').catch(() => null);
-
-  const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
-  await expectFacturaElectronicaExecutionSuccess(facturaStatusBox);
+  const facturaStatusBox = await executeFacturaOnCurrentOrder(page);
 
   await facturaStatusBox.scrollIntoViewIfNeeded();
 
@@ -768,23 +794,7 @@ test('execute factura electronica with default and non-default emitters', async 
 
   await page.goto(orderInfo.orderUrl);
   await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+/);
-
-  const ejecutarButton = page.locator('.fe-woo-ejecutar-factura').first();
-  await expect(ejecutarButton).toBeVisible();
-  await ejecutarButton.click();
-
-  await page.waitForFunction(() => {
-    return Boolean(
-      document.querySelector('.fe-woo-notice') ||
-      !document.querySelector('.fe-woo-ejecutar-factura')
-    );
-  }, { timeout: 20_000 });
-
-  await page.waitForTimeout(2500).catch(() => null);
-  await page.waitForLoadState('domcontentloaded').catch(() => null);
-
-  const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
-  await expectFacturaElectronicaExecutionSuccess(facturaStatusBox);
+  const facturaStatusBox = await executeFacturaOnCurrentOrder(page);
 
   for (const productName of orderInfo.productNames) {
     await expect(page.locator('body')).toContainText(productName);
@@ -831,6 +841,56 @@ test('cancel a completed order with generated factura electronica', async ({ pag
   await page.screenshot({ path: screenshotPath, fullPage: true });
   await testInfo.attach('wc-order-cancelled-full-page', {
     path: screenshotPath,
+    contentType: 'image/png',
+  });
+});
+
+// Toma una orden cancelada con FE generada y dispara una nota de crédito manual desde el metabox de facturas.
+test('generate credit note for cancelled order with generated factura electronica', async ({ page }, testInfo) => {
+  test.setTimeout(180000);
+
+  const facturaStatusBox = await prepareCancelledOrderWithGeneratedFactura(page);
+  await facturaStatusBox.scrollIntoViewIfNeeded();
+
+  const beforeScreenshotPath = testInfo.outputPath('wc-order-credit-note-before.png');
+  await page.screenshot({ path: beforeScreenshotPath, fullPage: true });
+  await testInfo.attach('wc-order-credit-note-before', {
+    path: beforeScreenshotPath,
+    contentType: 'image/png',
+  });
+
+  const notaDetails = facturaStatusBox.locator('details').filter({ hasText: /Generar nota|Generar nueva nota/i }).first();
+  await expect(notaDetails).toBeVisible();
+  await notaDetails.evaluate((element) => { element.open = true; });
+
+  const notaContainer = notaDetails.locator('.fe-woo-nota-form-container').first();
+  await expect(notaContainer).toBeVisible();
+
+  const referenceCodeSelect = notaContainer.locator('.fe-woo-reference-code').first();
+  const availableReferenceCodes = await referenceCodeSelect.locator('option').evaluateAll((options) =>
+    options.map((option) => option.value).filter(Boolean)
+  );
+  const randomReferenceCode = availableReferenceCodes[Math.floor(Math.random() * availableReferenceCodes.length)];
+
+  await notaContainer.locator('.fe-woo-note-type').first().selectOption('nota_credito');
+  await referenceCodeSelect.selectOption(randomReferenceCode);
+  await notaContainer.locator('.fe-woo-note-reason').first().fill('Generación de NC por pruebas smoke');
+
+  const generateNoteButton = notaContainer.locator('.fe-woo-generate-note').first();
+  await expect(generateNoteButton).toBeVisible();
+  await generateNoteButton.click();
+
+  const noteMessage = notaContainer.locator('.fe-woo-note-message').first();
+  await expect(noteMessage).toBeVisible({ timeout: 20_000 });
+  await expect(noteMessage).toContainText(/Nota de Crédito|Nota de Crédito generada|Crédito generada/i, { timeout: 20_000 });
+
+  await page.waitForLoadState('domcontentloaded').catch(() => null);
+  await expect(page.locator('#order_status')).toHaveValue('wc-cancelled');
+
+  const afterScreenshotPath = testInfo.outputPath('wc-order-credit-note-after.png');
+  await page.screenshot({ path: afterScreenshotPath, fullPage: true });
+  await testInfo.attach('wc-order-credit-note-after', {
+    path: afterScreenshotPath,
     contentType: 'image/png',
   });
 });
