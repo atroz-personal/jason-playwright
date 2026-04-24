@@ -843,40 +843,55 @@ test('generate credit note for cancelled order with generated factura electronic
     contentType: 'image/png',
   });
 
-  const notaDetails = facturaStatusBox.locator('details').filter({ hasText: /Generar nota|Generar nueva nota/i }).first();
-  await expect(notaDetails).toBeVisible();
-  await notaDetails.evaluate((element) => { element.open = true; });
+  const initialNotaForms = await facturaStatusBox
+    .locator('details')
+    .filter({ hasText: /Generar nota|Generar nueva nota/i })
+    .count();
+  expect(initialNotaForms).toBeGreaterThan(0);
 
-  const notaContainer = notaDetails.locator('.fe-woo-nota-form-container').first();
-  await expect(notaContainer).toBeVisible();
+  for (let noteIndex = 0; noteIndex < initialNotaForms; noteIndex += 1) {
+    const currentFacturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+    const notaDetails = currentFacturaStatusBox
+      .locator('details')
+      .filter({ hasText: /Generar nota|Generar nueva nota/i })
+      .nth(noteIndex);
 
-  const referenceCodeSelect = notaContainer.locator('.fe-woo-reference-code').first();
-  const availableReferenceCodes = await referenceCodeSelect.locator('option').evaluateAll((options) =>
-    options.map((option) => option.value).filter(Boolean)
-  );
-  const randomReferenceCode = availableReferenceCodes[Math.floor(Math.random() * availableReferenceCodes.length)];
+    await expect(notaDetails).toBeVisible();
+    await notaDetails.evaluate((element) => { element.open = true; });
 
-  await notaContainer.locator('.fe-woo-note-type').first().selectOption('nota_credito');
-  await referenceCodeSelect.selectOption(randomReferenceCode);
-  await notaContainer.locator('.fe-woo-note-reason').first().fill('Generación de NC por pruebas smoke');
+    const notaContainer = notaDetails.locator('.fe-woo-nota-form-container').first();
+    await expect(notaContainer).toBeVisible();
 
-  const generateNoteButton = notaContainer.locator('.fe-woo-generate-note').first();
-  await expect(generateNoteButton).toBeVisible();
-  await generateNoteButton.click();
+    const referenceCodeSelect = notaContainer.locator('.fe-woo-reference-code').first();
+    const availableReferenceCodes = await referenceCodeSelect.locator('option').evaluateAll((options) =>
+      options.map((option) => option.value).filter(Boolean)
+    );
+    const randomReferenceCode = availableReferenceCodes[Math.floor(Math.random() * availableReferenceCodes.length)];
 
-  const noteMessage = notaContainer.locator('.fe-woo-note-message').first();
-  await expect(noteMessage).toBeVisible({ timeout: 20_000 });
-  await expect(noteMessage).toContainText(/Nota de Crédito|Nota de Crédito generada|Crédito generada/i, { timeout: 20_000 });
+    await notaContainer.locator('.fe-woo-note-type').first().selectOption('nota_credito');
+    await referenceCodeSelect.selectOption(randomReferenceCode);
+    await notaContainer.locator('.fe-woo-note-reason').first().fill('Generación de NC por pruebas smoke');
 
-  await page.waitForTimeout(3000).catch(() => null);
-  await page.waitForLoadState('domcontentloaded').catch(() => null);
-  await expect(page.locator('#order_status')).toHaveValue('wc-cancelled');
+    const generateNoteButton = notaContainer.locator('.fe-woo-generate-note').first();
+    await expect(generateNoteButton).toBeVisible();
+    await generateNoteButton.click();
+
+    const noteMessage = notaContainer.locator('.fe-woo-note-message').first();
+    await expect(noteMessage).toBeVisible({ timeout: 20_000 });
+    await expect(noteMessage).toContainText(/Nota de Crédito|Nota de Crédito generada|Crédito generada/i, { timeout: 20_000 });
+
+    await page.waitForTimeout(3000).catch(() => null);
+    await page.waitForLoadState('domcontentloaded').catch(() => null);
+    await expect(page.locator('#order_status')).toHaveValue('wc-cancelled');
+  }
 
   const refreshedFacturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
   await expect
-    .poll(async () => (await refreshedFacturaStatusBox.textContent().catch(() => '')) || '', { timeout: 30_000 })
-    .toMatch(/NC\s*-|Nota de Crédito/i);
-  await expect(refreshedFacturaStatusBox).toContainText(/Descargar/i, { timeout: 30_000 });
+    .poll(async () => await refreshedFacturaStatusBox.locator('text=/NC\\s*-/i').count(), { timeout: 30_000 })
+    .toBeGreaterThanOrEqual(initialNotaForms);
+  await expect
+    .poll(async () => await refreshedFacturaStatusBox.getByRole('button', { name: /Descargar/i }).count(), { timeout: 30_000 })
+    .toBeGreaterThanOrEqual(initialNotaForms);
 
   const afterScreenshotPath = testInfo.outputPath('wc-order-credit-note-after.png');
   await page.screenshot({ path: afterScreenshotPath, fullPage: true });
