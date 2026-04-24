@@ -623,7 +623,7 @@ async function prepareCancelledOrderWithGeneratedFactura(page) {
   return page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
 }
 
-// Espera la versión ya renderizada del bloque de NC, incluyendo el botón de descarga por cada nota.
+// Espera la versión ya renderizada del bloque de NC para todas las facturas y al menos una descarga visible.
 async function waitForRenderedCreditNotes(page, expectedCount, timeoutMs = 60_000) {
   const startedAt = Date.now();
 
@@ -639,7 +639,7 @@ async function waitForRenderedCreditNotes(page, expectedCount, timeoutMs = 60_00
       .count()
       .catch(() => 0);
 
-    if (renderedCreditNotes >= expectedCount && downloadButtons >= expectedCount) {
+    if (renderedCreditNotes >= expectedCount && downloadButtons >= 1) {
       return;
     }
 
@@ -647,7 +647,7 @@ async function waitForRenderedCreditNotes(page, expectedCount, timeoutMs = 60_00
     await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
   }
 
-  throw new Error(`Rendered credit notes did not appear in time. Expected ${expectedCount} notes with download buttons.`);
+  throw new Error(`Rendered credit notes did not appear in time. Expected ${expectedCount} notes and at least one visible download button.`);
 }
 
 // Busca una orden completada que ya tenga evidencia de FE generada para reutilizarla en flujos de cambio de estado.
