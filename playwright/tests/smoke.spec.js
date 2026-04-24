@@ -623,6 +623,33 @@ async function prepareCancelledOrderWithGeneratedFactura(page) {
   return page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
 }
 
+// Espera la versión ya renderizada del bloque de NC, incluyendo el botón de descarga por cada nota.
+async function waitForRenderedCreditNotes(page, expectedCount, timeoutMs = 60_000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+    await expect(facturaStatusBox).toBeVisible({ timeout: 15_000 });
+
+    const statusText = ((await facturaStatusBox.textContent().catch(() => '')) || '').replace(/\s+/g, ' ');
+    const renderedCreditNotes = (statusText.match(/NC\s*-/gi) || []).length;
+    const downloadButtons = await facturaStatusBox
+      .locator('a, button')
+      .filter({ hasText: /Descargar/i })
+      .count()
+      .catch(() => 0);
+
+    if (renderedCreditNotes >= expectedCount && downloadButtons >= expectedCount) {
+      return;
+    }
+
+    await page.waitForTimeout(5000);
+    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
+  }
+
+  throw new Error(`Rendered credit notes did not appear in time. Expected ${expectedCount} notes with download buttons.`);
+}
+
 // Busca una orden completada que ya tenga evidencia de FE generada para reutilizarla en flujos de cambio de estado.
 async function findCompletedOrderWithGeneratedFactura(page) {
   await gotoAdminPage(page, '/wp-admin/edit.php?post_type=shop_order', /edit\.php\?post_type=shop_order|page=wc-orders/i);
@@ -885,13 +912,7 @@ test('generate credit note for cancelled order with generated factura electronic
     await expect(page.locator('#order_status')).toHaveValue('wc-cancelled');
   }
 
-  const refreshedFacturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
-  await expect
-    .poll(async () => await refreshedFacturaStatusBox.locator('text=/NC\\s*-/i').count(), { timeout: 30_000 })
-    .toBeGreaterThanOrEqual(initialNotaForms);
-  await expect
-    .poll(async () => await refreshedFacturaStatusBox.getByRole('button', { name: /Descargar/i }).count(), { timeout: 30_000 })
-    .toBeGreaterThanOrEqual(initialNotaForms);
+  await waitForRenderedCreditNotes(page, initialNotaForms);
 
   const afterScreenshotPath = testInfo.outputPath('wc-order-credit-note-after.png');
   await page.screenshot({ path: afterScreenshotPath, fullPage: true });
