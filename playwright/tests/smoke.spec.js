@@ -868,8 +868,15 @@ test('generate credit note for cancelled order with generated factura electronic
   await expect(noteMessage).toBeVisible({ timeout: 20_000 });
   await expect(noteMessage).toContainText(/Nota de Crédito|Nota de Crédito generada|Crédito generada/i, { timeout: 20_000 });
 
+  await page.waitForTimeout(3000).catch(() => null);
   await page.waitForLoadState('domcontentloaded').catch(() => null);
   await expect(page.locator('#order_status')).toHaveValue('wc-cancelled');
+
+  const refreshedFacturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+  await expect
+    .poll(async () => (await refreshedFacturaStatusBox.textContent().catch(() => '')) || '', { timeout: 30_000 })
+    .toMatch(/NC\s*-|Nota de Crédito/i);
+  await expect(refreshedFacturaStatusBox).toContainText(/Descargar/i, { timeout: 30_000 });
 
   const afterScreenshotPath = testInfo.outputPath('wc-order-credit-note-after.png');
   await page.screenshot({ path: afterScreenshotPath, fullPage: true });
