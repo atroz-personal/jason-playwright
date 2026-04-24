@@ -580,6 +580,50 @@ async function expectFacturaElectronicaExecutionSuccess(facturaStatusBox) {
   await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente|\d+\s+Factura(?:s)?\s+Generada(?:s)?/i);
 }
 
+// Busca una orden completada que ya tenga evidencia de FE generada para reutilizarla en flujos de cambio de estado.
+async function findCompletedOrderWithGeneratedFactura(page) {
+  await gotoAdminPage(page, '/wp-admin/edit.php?post_type=shop_order', /edit\.php\?post_type=shop_order|page=wc-orders/i);
+
+  const orderRows = page.locator('table.wp-list-table tbody tr, #the-list tr');
+  const rowCount = await orderRows.count();
+  if (rowCount === 0) {
+    throw new Error('No WooCommerce orders were found in the admin list.');
+  }
+
+  const candidateIndexes = Array.from({ length: rowCount }, (_, index) => index)
+    .sort(() => Math.random() - 0.5);
+
+  for (const rowIndex of candidateIndexes) {
+    const row = orderRows.nth(rowIndex);
+    const rowText = await row.textContent().catch(() => '');
+
+    if (!/Completed|Completado/i.test(rowText || '')) {
+      continue;
+    }
+
+    const orderLink = row.locator('a.row-title, .order-view a, a').first();
+    const href = await orderLink.getAttribute('href').catch(() => null);
+    if (!href) {
+      continue;
+    }
+
+    await page.goto(href);
+    await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+|post=\d+&action=edit/);
+
+    const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+    if (!(await facturaStatusBox.isVisible().catch(() => false))) {
+      continue;
+    }
+
+    const statusText = await facturaStatusBox.textContent().catch(() => '');
+    if (/Clave:|\d+\s+Factura(?:s)?\s+Generada(?:s)?/i.test(statusText || '')) {
+      return { orderUrl: page.url(), facturaStatusBox };
+    }
+  }
+
+  throw new Error('Could not find a completed WooCommerce order with generated Factura Electronica data.');
+}
+
 // Confirma que el sitio base levanta y que WordPress responde con contenido visible.
 test('homepage responds and shows WordPress content', async ({ page }) => {
   await page.goto('/');
@@ -751,6 +795,36 @@ test('execute factura electronica with default and non-default emitters', async 
   await page.screenshot({ path: fullPageScreenshotPath, fullPage: true });
   await testInfo.attach('wc-order-execute-mixed-emitters-full-page', {
     path: fullPageScreenshotPath,
+    contentType: 'image/png',
+  });
+});
+
+// Reutiliza una orden completada con FE ya generada y valida que todavía podamos moverla a cancelada.
+test('cancel a completed order with generated factura electronica', async ({ page }, testInfo) => {
+  test.setTimeout(120000);
+
+  const orderInfo = await findCompletedOrderWithGeneratedFactura(page);
+  await page.goto(orderInfo.orderUrl);
+
+  const statusSelect = page.locator('#order_status');
+  await expect(statusSelect).toBeVisible();
+  await statusSelect.selectOption('wc-cancelled');
+  await expect(statusSelect).toHaveValue('wc-cancelled');
+
+  const updateButton = page.getByRole('button', { name: /^Update$/i }).first();
+  await expect(updateButton).toBeVisible();
+  await Promise.all([
+    page.waitForLoadState('domcontentloaded'),
+    updateButton.click(),
+  ]);
+
+  await expect(page.locator('#order_status')).toHaveValue('wc-cancelled');
+  await expect(page.locator('body')).toContainText(/Order updated|orden actualizada/i);
+
+  const screenshotPath = testInfo.outputPath('wc-order-cancelled-full-page.png');
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+  await testInfo.attach('wc-order-cancelled-full-page', {
+    path: screenshotPath,
     contentType: 'image/png',
   });
 });
