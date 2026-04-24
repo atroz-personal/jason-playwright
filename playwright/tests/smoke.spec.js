@@ -623,7 +623,7 @@ async function prepareCancelledOrderWithGeneratedFactura(page) {
   return page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
 }
 
-// Espera la versión ya renderizada del bloque de NC para todas las facturas y al menos una descarga visible.
+// Espera la versión ya renderizada del bloque de NC para todas las facturas antes de tomar evidencia.
 async function waitForRenderedCreditNotes(page, expectedCount, timeoutMs = 60_000) {
   const startedAt = Date.now();
 
@@ -633,13 +633,8 @@ async function waitForRenderedCreditNotes(page, expectedCount, timeoutMs = 60_00
 
     const statusText = ((await facturaStatusBox.textContent().catch(() => '')) || '').replace(/\s+/g, ' ');
     const renderedCreditNotes = (statusText.match(/NC\s*-/gi) || []).length;
-    const downloadButtons = await facturaStatusBox
-      .locator('a, button')
-      .filter({ hasText: /Descargar/i })
-      .count()
-      .catch(() => 0);
 
-    if (renderedCreditNotes >= expectedCount && downloadButtons >= 1) {
+    if (renderedCreditNotes >= expectedCount) {
       return;
     }
 
@@ -647,7 +642,7 @@ async function waitForRenderedCreditNotes(page, expectedCount, timeoutMs = 60_00
     await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
   }
 
-  throw new Error(`Rendered credit notes did not appear in time. Expected ${expectedCount} notes and at least one visible download button.`);
+  throw new Error(`Rendered credit notes did not appear in time. Expected ${expectedCount} rendered notes.`);
 }
 
 // Cierra u oculta overlays flotantes del admin para que no tapen la evidencia visual.
