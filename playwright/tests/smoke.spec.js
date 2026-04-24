@@ -358,36 +358,22 @@ async function addExistingProductToOrder(page, productName, quantity) {
 
   const productSearch = page.locator('.select2-container--open .select2-search__field').last();
   await expect(productSearch).toBeVisible();
-  const exactProductPattern = new RegExp(`^\\s*${escapeRegExp(productName)}\\s*$`);
-  let productOption;
+  await productSearch.fill(productName);
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await productSearch.fill(productName);
-    productOption = page
-      .locator('.select2-results__option')
-      .filter({ hasText: exactProductPattern })
-      .first();
-
-    if (await productOption.isVisible().catch(() => false)) {
-      break;
-    }
-
+  let productOption = page
+    .locator('.select2-results__option')
+    .filter({ hasText: new RegExp(`^\\s*${escapeRegExp(productName)}\\s*$`) })
+    .first();
+  if (!(await productOption.isVisible().catch(() => false))) {
     const fallbackSearch = productName.split(' ').slice(-1).join(' ');
     await productSearch.fill(fallbackSearch);
     productOption = page
       .locator('.select2-results__option')
-      .filter({ hasText: new RegExp(`^\\s*${escapeRegExp(fallbackSearch)}\\s*$|${escapeRegExp(fallbackSearch)}`) })
+      .filter({ hasText: new RegExp(escapeRegExp(fallbackSearch)) })
       .first();
-
-    if (await productOption.isVisible().catch(() => false)) {
-      break;
-    }
-
-    await page.waitForTimeout(1000);
-    await modal.locator('.select2-selection--single').click().catch(() => null);
   }
 
-  await expect(productOption).toBeVisible({ timeout: 20_000 });
+  await expect(productOption).toBeVisible({ timeout: 15_000 });
   const selectedProductLabel = ((await productOption.textContent()) || productName).trim();
   await productOption.click();
 
@@ -860,7 +846,6 @@ test('cancel a completed order with generated factura electronica', async ({ pag
 });
 
 // Toma una orden cancelada con FE generada y dispara una nota de crédito manual desde el metabox de facturas.
-// Simula el caso real de anular una orden ya facturada y generar su nota de crédito desde el admin.
 test('generate credit note for cancelled order with generated factura electronica', async ({ page }, testInfo) => {
   test.setTimeout(180000);
 
