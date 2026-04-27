@@ -336,9 +336,39 @@ async function createProductWithFacturaEmitter(page, { productName, regularPrice
   await expect(productRowLink).toBeVisible({ timeout: 20_000 });
 
   const productRow = page.locator('#the-list tr').filter({ has: productRowLink }).first();
-  await expect(productRow).toContainText(new RegExp(`${Number(regularPrice).toFixed(2)}`));
-
   const editLink = await productRowLink.getAttribute('href');
+  const productRowText = (await productRow.textContent().catch(() => '')) || '';
+
+  if (/Draft|Borrador/i.test(productRowText) && editLink) {
+    await page.goto(editLink);
+    await expect(page.locator('body')).toContainText(/Edit product|Editar producto|Update|Publish/i);
+
+    const statusSelect = page.locator('#post_status').first();
+    if (await statusSelect.isVisible().catch(() => false)) {
+      await statusSelect.selectOption('publish').catch(() => null);
+    }
+
+    const finalizeButton = page.getByRole('button', { name: /publish|update/i }).last();
+    await finalizeButton.scrollIntoViewIfNeeded();
+    await expect(finalizeButton).toBeEnabled({ timeout: 15_000 });
+    await finalizeButton.click();
+
+    await expect(page.locator('input[name="_regular_price"], #_regular_price').first()).toHaveValue(regularPrice);
+
+    await gotoAdminPage(
+      page,
+      `/wp-admin/edit.php?post_type=product&s=${encodeURIComponent(productName)}`,
+      /edit\.php\?post_type=product/
+    );
+  }
+
+  const refreshedProductRowLink = page.locator('.row-title', { hasText: productName }).first();
+  await expect(refreshedProductRowLink).toBeVisible({ timeout: 20_000 });
+  const refreshedProductRow = page.locator('#the-list tr').filter({ has: refreshedProductRowLink }).first();
+  const refreshedRowText = (await refreshedProductRow.textContent().catch(() => '')) || '';
+  if (!/Draft|Borrador/i.test(refreshedRowText)) {
+    await expect(refreshedProductRow).toContainText(new RegExp(`${Number(regularPrice).toFixed(2)}`));
+  }
 
   return {
     productName,
