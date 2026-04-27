@@ -653,8 +653,8 @@ async function prepareCancelledOrderWithGeneratedFactura(page) {
   return page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
 }
 
-// Espera la versión ya renderizada del bloque de NC para todas las facturas antes de tomar evidencia.
-async function waitForRenderedCreditNotes(page, expectedCount, timeoutMs = 60_000) {
+// Espera la versión ya renderizada del bloque de NC usando la razón como marcador estable en el metabox.
+async function waitForRenderedCreditNotes(page, expectedCount, reasonText, timeoutMs = 60_000) {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
@@ -662,7 +662,9 @@ async function waitForRenderedCreditNotes(page, expectedCount, timeoutMs = 60_00
     await expect(facturaStatusBox).toBeVisible({ timeout: 15_000 });
 
     const statusText = ((await facturaStatusBox.textContent().catch(() => '')) || '').replace(/\s+/g, ' ');
-    const renderedCreditNotes = (statusText.match(/NC\s*-/gi) || []).length;
+    const renderedCreditNotes = reasonText
+      ? statusText.split(reasonText).length - 1
+      : (statusText.match(/Nota de Crédito/gi) || []).length;
 
     if (renderedCreditNotes >= expectedCount) {
       return;
@@ -672,7 +674,7 @@ async function waitForRenderedCreditNotes(page, expectedCount, timeoutMs = 60_00
     await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
   }
 
-  throw new Error(`Rendered credit notes did not appear in time. Expected ${expectedCount} rendered notes.`);
+  throw new Error(`Rendered credit notes did not appear in time. Expected ${expectedCount} rendered notes for reason "${reasonText}".`);
 }
 
 // Cierra u oculta overlays flotantes del admin para que no tapen la evidencia visual.
@@ -916,6 +918,7 @@ test('cancel a completed order with generated factura electronica', async ({ pag
 // Toma una orden cancelada con FE generada y dispara una nota de crédito manual desde el metabox de facturas.
 test('generate credit note for cancelled order with generated factura electronica', async ({ page }, testInfo) => {
   test.setTimeout(180000);
+  const creditNoteReason = 'Generación de NC por pruebas smoke';
 
   const facturaStatusBox = await prepareCancelledOrderWithGeneratedFactura(page);
   await facturaStatusBox.scrollIntoViewIfNeeded();
@@ -962,7 +965,7 @@ test('generate credit note for cancelled order with generated factura electronic
 
     await notaContainer.locator('.fe-woo-note-type').first().selectOption('nota_credito');
     await referenceCodeSelect.selectOption(randomReferenceCode);
-    await notaContainer.locator('.fe-woo-note-reason').first().fill('Generación de NC por pruebas smoke');
+    await notaContainer.locator('.fe-woo-note-reason').first().fill(creditNoteReason);
 
     const generateNoteButton = notaContainer.locator('.fe-woo-generate-note').first();
     await expect(generateNoteButton).toBeVisible();
@@ -977,7 +980,7 @@ test('generate credit note for cancelled order with generated factura electronic
     await expect(page.locator('#order_status')).toHaveValue('wc-cancelled');
   }
 
-  await waitForRenderedCreditNotes(page, initialNotaForms);
+  await waitForRenderedCreditNotes(page, initialNotaForms, creditNoteReason);
   await dismissFloatingAdminOverlays(page);
 
   const refreshedFacturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
