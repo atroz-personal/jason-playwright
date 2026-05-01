@@ -601,13 +601,45 @@ async function createCompletedFacturaOrderWithMixedEmitters(page) {
 async function expectFacturaElectronicaExecutionSuccess(facturaStatusBox) {
   await expect(facturaStatusBox).toBeVisible();
   await expect(facturaStatusBox).not.toContainText(/La prueba de conexión no se ha completado exitosamente/i);
-  await expect(facturaStatusBox).not.toContainText(/EN COLA/i);
   await expect(facturaStatusBox).toContainText(/Clave:|\d+\s+Factura(?:s)?\s+Generada(?:s)?/i);
   await expect(facturaStatusBox).toContainText(/Estado Local:/i);
   await expect(facturaStatusBox).toContainText(/Enviada/i);
   await expect(facturaStatusBox).toContainText(/Estado Hacienda:/i);
   await expect(facturaStatusBox).toContainText(/Procesando|Aceptada/i);
   await expect(facturaStatusBox).toContainText(/Factura Enviada Exitosamente|\d+\s+Factura(?:s)?\s+Generada(?:s)?/i);
+}
+
+// El plugin nuevo puede dejar la factura en cola primero; aquí esperamos hasta que pase al estado ya ejecutado.
+async function waitForFacturaElectronicaExecutionSuccess(page, timeoutMs = 120_000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
+    await expect(facturaStatusBox).toBeVisible({ timeout: 15_000 });
+
+    const statusText = ((await facturaStatusBox.textContent().catch(() => '')) || '').replace(/\s+/g, ' ');
+
+    if (!/La prueba de conexión no se ha completado exitosamente/i.test(statusText)) {
+      const isQueued = /Estado de Cola:|En Cola|cola de procesamiento/i.test(statusText);
+      const hasExecutionState =
+        /Clave:|\d+\s+Factura(?:s)?\s+Generada(?:s)?/i.test(statusText) &&
+        /Estado Local:/i.test(statusText) &&
+        /Enviada/i.test(statusText) &&
+        /Estado Hacienda:/i.test(statusText) &&
+        /Procesando|Aceptada/i.test(statusText) &&
+        /Factura Enviada Exitosamente|\d+\s+Factura(?:s)?\s+Generada(?:s)?/i.test(statusText);
+
+      if (!isQueued && hasExecutionState) {
+        await expectFacturaElectronicaExecutionSuccess(facturaStatusBox);
+        return facturaStatusBox;
+      }
+    }
+
+    await page.waitForTimeout(5000);
+    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null);
+  }
+
+  throw new Error('Factura Electronica did not leave queue and reach executed state in time.');
 }
 
 // Ejecuta FE sobre la orden actual y valida el estado final esperado en el metabox.
@@ -626,9 +658,7 @@ async function executeFacturaOnCurrentOrder(page) {
   await page.waitForTimeout(2500).catch(() => null);
   await page.waitForLoadState('domcontentloaded').catch(() => null);
 
-  const facturaStatusBox = page.locator('.postbox').filter({ hasText: 'Factura Electrónica Status' }).first();
-  await expectFacturaElectronicaExecutionSuccess(facturaStatusBox);
-  return facturaStatusBox;
+  return waitForFacturaElectronicaExecutionSuccess(page);
 }
 
 // Deja una orden en estado cancelado pero con FE ya generada para probar notas de crédito arriba de datos reales.
