@@ -427,6 +427,62 @@ async function addExistingProductToOrder(page, productName, quantity) {
   return addedProductName;
 }
 
+// Completa ubicación FE con una combinación válida tomada de las opciones ya cargadas por el plugin.
+async function fillFacturaElectronicaLocation(page) {
+  const provinciaField = page.locator('#fe_woo_provincia').first();
+  const cantonField = page.locator('#fe_woo_canton').first();
+  const distritoField = page.locator('#fe_woo_distrito').first();
+  const otrasSenasField = page.locator('#fe_woo_otras_senas').first();
+
+  await expect(provinciaField).toBeVisible({ timeout: 15_000 });
+  await expect
+    .poll(async () => provinciaField.locator('option').evaluateAll((options) =>
+      options.map((option) => option.value).filter(Boolean).length
+    ), { timeout: 20_000 })
+    .toBeGreaterThan(0);
+
+  const provinciaOptions = await provinciaField.locator('option').evaluateAll((options) =>
+    options.map((option) => option.value).filter(Boolean)
+  );
+  const randomProvincia = provinciaOptions[Math.floor(Math.random() * provinciaOptions.length)];
+  await provinciaField.selectOption(randomProvincia);
+  await expect(provinciaField).toHaveValue(randomProvincia);
+
+  await expect
+    .poll(async () => Number(!(await cantonField.isDisabled().catch(() => true))), { timeout: 20_000 })
+    .toBe(1);
+  await expect
+    .poll(async () => cantonField.locator('option').evaluateAll((options) =>
+      options.map((option) => option.value).filter(Boolean).length
+    ), { timeout: 20_000 })
+    .toBeGreaterThan(0);
+
+  const cantonOptions = await cantonField.locator('option').evaluateAll((options) =>
+    options.map((option) => option.value).filter(Boolean)
+  );
+  const randomCanton = cantonOptions[Math.floor(Math.random() * cantonOptions.length)];
+  await cantonField.selectOption(randomCanton);
+  await expect(cantonField).toHaveValue(randomCanton);
+
+  await expect
+    .poll(async () => Number(!(await distritoField.isDisabled().catch(() => true))), { timeout: 20_000 })
+    .toBe(1);
+  await expect
+    .poll(async () => distritoField.locator('option').evaluateAll((options) =>
+      options.map((option) => option.value).filter(Boolean).length
+    ), { timeout: 20_000 })
+    .toBeGreaterThan(0);
+
+  const distritoOptions = await distritoField.locator('option').evaluateAll((options) =>
+    options.map((option) => option.value).filter(Boolean)
+  );
+  const randomDistrito = distritoOptions[Math.floor(Math.random() * distritoOptions.length)];
+  await distritoField.selectOption(randomDistrito);
+  await expect(distritoField).toHaveValue(randomDistrito);
+
+  await otrasSenasField.fill('Texto dummy de Playwright test para otras señas.');
+}
+
 // Arma una orden completada con FE usando productos ya existentes y una cantidad de items configurable.
 async function createCompletedFacturaOrder(page, options = {}) {
   const { itemCount, minItemCount, maxItemCount } = options;
@@ -475,6 +531,7 @@ async function createCompletedFacturaOrder(page, options = {}) {
   await page.locator('#fe_woo_phone').fill('22223333');
   await page.locator('#fe_woo_activity_code').fill('1234.5');
   await expect(page.locator('#fe_woo_activity_code')).toHaveValue(/^\d{4}\.\d$/);
+  await fillFacturaElectronicaLocation(page);
 
   const addedProducts = [];
   for (const productName of selectedProducts) {
@@ -564,6 +621,7 @@ async function createCompletedFacturaOrderWithMixedEmitters(page) {
   await page.locator('#fe_woo_phone').fill('22223333');
   await page.locator('#fe_woo_activity_code').fill('1234.5');
   await expect(page.locator('#fe_woo_activity_code')).toHaveValue(/^\d{4}\.\d$/);
+  await fillFacturaElectronicaLocation(page);
 
   const addedProducts = [];
   for (const productDefinition of productDefinitions) {
