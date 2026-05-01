@@ -10,11 +10,73 @@
     'use strict';
 
     /**
+     * Browser-side polling: tras el AJAX de "Ejecutar Factura", si la
+     * respuesta vino con pending=true (Hacienda todavía no devolvió el
+     * acuse firmado), pregunta al server cada 3s vía recheck_status hasta
+     * verlo terminal o agotar 30 intentos (~90s). Mientras tanto, mantiene
+     * el botón con spinner + texto "esperando acuse".
+     *
+     * Cada poll es una request HTTP independiente y corta (timeout 8s),
+     * por lo que nunca cruza el límite de 60s de nginx Pantheon.
+     *
+     * Si el admin cierra la pestaña, el cron WP `fe_woo_poll_acuse_xml`
+     * (programado por el server tras el envío) termina el trabajo en
+     * background — la próxima vez que se abra la orden ya tendrá
+     * veredicto.
+     */
+    function pollOrderStatus($button, originalText, orderId, clave, onTerminal, onTimeout) {
+        var attempts = 0;
+        var MAX_ATTEMPTS = 30;
+        var INTERVAL_MS = 3000;
+
+        var timer = setInterval(function () {
+            attempts++;
+
+            $.ajax({
+                url:     feWooOrderAdmin.ajaxUrl,
+                type:    'POST',
+                timeout: 8000,
+                data:    {
+                    action:   'fe_woo_recheck_status',
+                    order_id: orderId,
+                    clave:    clave,
+                    nonce:    feWooOrderAdmin.nonce
+                }
+            }).done(function (response) {
+                var status = (response && response.data && response.data.hacienda_status) || '';
+                status = String(status).toLowerCase();
+
+                if (status === 'aceptado' || status === 'rechazado') {
+                    clearInterval(timer);
+                    onTerminal(status, response.data);
+                    return;
+                }
+
+                if (attempts >= MAX_ATTEMPTS) {
+                    clearInterval(timer);
+                    onTimeout();
+                }
+            }).fail(function () {
+                // Una falla en un poll individual no termina el loop:
+                // puede haber sido glitch de red. Solo cortamos al MAX.
+                if (attempts >= MAX_ATTEMPTS) {
+                    clearInterval(timer);
+                    onTimeout();
+                }
+            });
+        }, INTERVAL_MS);
+
+        return timer;
+    }
+
+    /**
      * Initialize when DOM is ready
      */
     $(document).ready(function() {
         initEjecutarButton();
         initDownloadAllButton();
+        initRecheckStatusButton();
+        initRetryWithUpdatedDataButton();
         initDownloadAllMultiButton();
         initDownloadSingleFacturaButton();
         initDownloadNotaDocsButton();
@@ -31,46 +93,193 @@
 
             var $button = $(this);
             var orderId = $button.data('order-id');
-            var originalText = $button.text();
+            var originalText = $button.html();
 
-            // Disable button and show loading state
+            // Fase 1 (envío): el AJAX firma + POST a Hacienda + persiste.
+            // En la nueva arquitectura este AJAX retorna en <40s sin
+            // bloquear esperando el acuse. Por eso el texto distingue
+            // "Enviando…" (esta fase) de "Esperando acuse…" (fase 2,
+            // polling JS posterior).
             $button.prop('disabled', true);
-            $button.text(feWooOrderAdmin.i18n.executing);
+            $button.html(
+                '<span class="spinner is-active" style="float:none;margin:0 6px 0 0;vertical-align:middle;"></span>' +
+                'Enviando factura a Hacienda…'
+            );
 
-            // Send AJAX request
             $.ajax({
                 url: feWooOrderAdmin.ajaxUrl,
                 type: 'POST',
+                // El AJAX 1 ya no espera el veredicto — solo envía y
+                // persiste. 60s es margen suficiente para el envío + 1
+                // query corta opcional. El polling del veredicto se
+                // hace en fase 2 con requests independientes.
+                timeout: 60000,
                 data: {
                     action: 'fe_woo_manual_execute_factura',
                     order_id: orderId,
                     nonce: feWooOrderAdmin.nonce
                 },
                 success: function(response) {
+                    if (!response.success) {
+                        showMessage((response.data && response.data.message) || feWooOrderAdmin.i18n.error, 'error');
+                        $button.prop('disabled', false).html(originalText);
+                        return;
+                    }
+
+                    var data    = response.data || {};
+                    var pending = !!data.pending;
+                    var clave   = data.clave;
+                    var oid     = data.order_id || orderId;
+
+                    if (!pending) {
+                        // Happy path: Hacienda ya devolvió veredicto en
+                        // la misma respuesta del envío.
+                        showMessage(data.message || 'Factura procesada', 'success');
+                        setTimeout(function() { location.reload(); }, 800);
+                        return;
+                    }
+
+                    // Fase 2 (espera de acuse): JS hace polling al server
+                    // hasta veredicto o timeout. El cron WP en background
+                    // sigue corriendo como red de seguridad.
+                    $button.html(
+                        '<span class="spinner is-active" style="float:none;margin:0 6px 0 0;vertical-align:middle;"></span>' +
+                        'Enviada, esperando acuse de Hacienda…'
+                    );
+
+                    pollOrderStatus(
+                        $button, originalText, oid, clave,
+                        function onTerminal(status) {
+                            showMessage(
+                                status === 'aceptado'
+                                    ? 'Factura aceptada por Hacienda.'
+                                    : 'Factura rechazada por Hacienda. Revisa los detalles en la orden.',
+                                status === 'aceptado' ? 'success' : 'error'
+                            );
+                            setTimeout(function() { location.reload(); }, 800);
+                        },
+                        function onTimeout() {
+                            showMessage(
+                                'Factura enviada, pero Hacienda aún no ha respondido. Refresca la página en unos minutos para ver el estado actualizado.',
+                                'info'
+                            );
+                            $button.prop('disabled', false).html(originalText);
+                        }
+                    );
+                },
+                error: function(xhr, status) {
+                    var msg = (status === 'timeout')
+                        ? 'Tiempo de espera agotado. La factura puede haber sido enviada. Recarga la página para ver el estado.'
+                        : feWooOrderAdmin.i18n.error;
+                    showMessage(msg, 'error');
+                    $button.prop('disabled', false).html(originalText);
+                }
+            });
+        });
+    }
+
+    /**
+     * Shown on rejected/pending invoices — re-hits Hacienda's consulta
+     * endpoint for the current clave so the operator can pick up late
+     * state changes (e.g. Hacienda flips "rechazado" → "aceptado" after a
+     * manual override, or a "recibido" progresses to final). Does not
+     * re-sign or re-send; the reexecute button handles that.
+     */
+    function initRecheckStatusButton() {
+        $(document).on('click', '.fe-woo-recheck-status', function(e) {
+            e.preventDefault();
+
+            var $button = $(this);
+            var orderId = $button.data('order-id');
+            var originalHtml = $button.html();
+
+            // Visible spinner — the recheck can take a few seconds on the
+            // first call (fresh OAuth token + consulta round-trip).
+            $button.prop('disabled', true).html(
+                '<span class="spinner is-active" style="float:none;margin:0 6px 0 0;vertical-align:middle;"></span>' +
+                'Consultando a Hacienda…'
+            );
+
+            $.ajax({
+                url: feWooOrderAdmin.ajaxUrl,
+                type: 'POST',
+                timeout: 60000,
+                data: {
+                    action: 'fe_woo_recheck_status',
+                    order_id: orderId,
+                    nonce: feWooOrderAdmin.nonce
+                },
+                success: function(response) {
                     if (response.success) {
-                        // Show success message
                         showMessage(response.data.message, 'success');
-
-                        // Reload page after 2 seconds to show updated status
-                        setTimeout(function() {
-                            location.reload();
-                        }, 2000);
+                        setTimeout(function() { location.reload(); }, 800);
                     } else {
-                        // Show error message
-                        showMessage(response.data.message, 'error');
-
-                        // Re-enable button
-                        $button.prop('disabled', false);
-                        $button.text(originalText);
+                        showMessage((response.data && response.data.message) || feWooOrderAdmin.i18n.error, 'error');
+                        $button.prop('disabled', false).html(originalHtml);
                     }
                 },
-                error: function() {
-                    // Show error message
-                    showMessage(feWooOrderAdmin.i18n.error, 'error');
+                error: function(xhr, status) {
+                    var msg = (status === 'timeout')
+                        ? 'La consulta tardó demasiado. Intenta de nuevo en unos segundos.'
+                        : feWooOrderAdmin.i18n.error;
+                    showMessage(msg, 'error');
+                    $button.prop('disabled', false).html(originalHtml);
+                }
+            });
+        });
+    }
 
-                    // Re-enable button
-                    $button.prop('disabled', false);
-                    $button.text(originalText);
+    /**
+     * Shown only on rejected invoices. Discards the rejected attempt and
+     * reprocesses the order with the current emisor/config — a fresh
+     * clave, new signature, new POST to Hacienda. User-facing confirm
+     * prompts them about the consequences since the previous clave is
+     * effectively abandoned.
+     */
+    function initRetryWithUpdatedDataButton() {
+        $(document).on('click', '.fe-woo-retry-with-updated-data', function(e) {
+            e.preventDefault();
+
+            var $button = $(this);
+            var orderId = $button.data('order-id');
+            var originalHtml = $button.html();
+
+            if (!window.confirm(
+                'Esto descartará la factura rechazada y generará una nueva con los datos actuales del emisor.\n\n' +
+                '¿Continuar?'
+            )) {
+                return;
+            }
+
+            $button.prop('disabled', true).html(
+                '<span class="spinner is-active" style="float:none;margin:0 6px 0 0;vertical-align:middle;"></span>' +
+                'Reprocesando…'
+            );
+
+            $.ajax({
+                url: feWooOrderAdmin.ajaxUrl,
+                type: 'POST',
+                timeout: 120000,
+                data: {
+                    action: 'fe_woo_retry_with_updated_data',
+                    order_id: orderId,
+                    nonce: feWooOrderAdmin.nonce
+                },
+                success: function(response) {
+                    if (response.success) {
+                        showMessage(response.data.message, 'success');
+                        setTimeout(function() { location.reload(); }, 800);
+                    } else {
+                        showMessage((response.data && response.data.message) || feWooOrderAdmin.i18n.error, 'error');
+                        $button.prop('disabled', false).html(originalHtml);
+                    }
+                },
+                error: function(xhr, status) {
+                    var msg = (status === 'timeout')
+                        ? 'Tiempo de espera agotado. Recarga la página para ver el estado actual.'
+                        : feWooOrderAdmin.i18n.error;
+                    showMessage(msg, 'error');
+                    $button.prop('disabled', false).html(originalHtml);
                 }
             });
         });

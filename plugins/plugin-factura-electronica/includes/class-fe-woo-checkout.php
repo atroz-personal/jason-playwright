@@ -92,6 +92,16 @@ class FE_Woo_Checkout {
                 [],
                 FE_WOO_VERSION
             );
+
+            // CR ubicacion cascade (Provincia/Cantón/Distrito).
+            wp_enqueue_script(
+                'fe-woo-cr-locations',
+                FE_WOO_PLUGIN_URL . 'assets/js/cr-locations.js',
+                ['jquery'],
+                FE_WOO_VERSION,
+                true
+            );
+            wp_localize_script('fe-woo-cr-locations', 'feWooCrLocations', FE_Woo_CR_Locations::get_localize_payload());
         }
     }
 
@@ -201,12 +211,55 @@ class FE_Woo_Checkout {
             'label' => __('Código de actividad económica', 'fe-woo'),
             'required' => false,
             'placeholder' => __('Ej: 1234.5', 'fe-woo'),
+            'description' => __('Opcional. Llenar solo si conoces el código exacto de actividad económica registrado para tu empresa en Hacienda. Si lo dejas en blanco, la factura se emite sin este campo.', 'fe-woo'),
             'custom_attributes' => [
                 'pattern' => '\d{4}\.\d{1}',
                 'maxlength' => '6',
                 'title' => __('Formato requerido: 4 dígitos, punto, 1 dígito. Ejemplo: 1234.5', 'fe-woo'),
             ],
         ], $checkout->get_value('fe_woo_activity_code') ?: '');
+
+        // Ubicación (Provincia / Cantón / Distrito + OtrasSenas).
+        // Hidratamos desde user_meta si el cliente tiene datos previos guardados,
+        // de modo que el cascade JS los preseleccione en su orden correcto.
+        $initial_provincia = $checkout->get_value('fe_woo_provincia')
+            ?: ($user_id ? (string) get_user_meta($user_id, 'fe_woo_provincia', true) : '');
+        $initial_canton = $checkout->get_value('fe_woo_canton')
+            ?: ($user_id ? (string) get_user_meta($user_id, 'fe_woo_canton', true) : '');
+        $initial_distrito = $checkout->get_value('fe_woo_distrito')
+            ?: ($user_id ? (string) get_user_meta($user_id, 'fe_woo_distrito', true) : '');
+        $initial_otras_senas = $checkout->get_value('fe_woo_otras_senas')
+            ?: ($user_id ? (string) get_user_meta($user_id, 'fe_woo_otras_senas', true) : '');
+        ?>
+        <div class="fe-woo-ubicacion-block"
+             data-fe-cr-locations="1"
+             data-initial-provincia="<?php echo esc_attr($initial_provincia); ?>"
+             data-initial-canton="<?php echo esc_attr($initial_canton); ?>"
+             data-initial-distrito="<?php echo esc_attr($initial_distrito); ?>">
+
+            <p class="form-row form-row-wide fe-woo-field">
+                <label for="fe_woo_provincia"><?php esc_html_e('Provincia', 'fe-woo'); ?> <abbr class="required" title="required">*</abbr></label>
+                <select name="fe_woo_provincia" id="fe_woo_provincia" data-fe-cr-role="provincia" class="select"></select>
+            </p>
+
+            <p class="form-row form-row-wide fe-woo-field">
+                <label for="fe_woo_canton"><?php esc_html_e('Cantón', 'fe-woo'); ?> <abbr class="required" title="required">*</abbr></label>
+                <select name="fe_woo_canton" id="fe_woo_canton" data-fe-cr-role="canton" class="select" disabled></select>
+            </p>
+
+            <p class="form-row form-row-wide fe-woo-field">
+                <label for="fe_woo_distrito"><?php esc_html_e('Distrito', 'fe-woo'); ?> <abbr class="required" title="required">*</abbr></label>
+                <select name="fe_woo_distrito" id="fe_woo_distrito" data-fe-cr-role="distrito" class="select" disabled></select>
+            </p>
+
+            <p class="form-row form-row-wide fe-woo-field">
+                <label for="fe_woo_otras_senas"><?php esc_html_e('Otras Señas', 'fe-woo'); ?> <abbr class="required" title="required">*</abbr></label>
+                <textarea name="fe_woo_otras_senas" id="fe_woo_otras_senas" rows="3" maxlength="250"
+                          placeholder="<?php esc_attr_e('Ej: 200m sur del parque, casa color blanco', 'fe-woo'); ?>"><?php echo esc_textarea($initial_otras_senas); ?></textarea>
+                <span class="description"><?php esc_html_e('Mínimo 5 caracteres, máximo 250.', 'fe-woo'); ?></span>
+            </p>
+        </div>
+        <?php
 
         echo '</div>'; // End fe_woo_factura_details
         echo '</div>'; // End fe_woo_factura_fields
@@ -266,6 +319,27 @@ class FE_Woo_Checkout {
             if (!FE_Woo_Hacienda_Config::validate_activity_code_format($activity_code)) {
                 wc_add_notice(__('El código de actividad económica es inválido. Formato requerido: 4 dígitos, punto, 1 dígito. Ejemplo: 1234.5', 'fe-woo'), 'error');
             }
+        }
+
+        // Validate Ubicación (provincia / cantón / distrito + otras señas)
+        $provincia = isset($_POST['fe_woo_provincia']) ? sanitize_text_field(wp_unslash($_POST['fe_woo_provincia'])) : '';
+        $canton    = isset($_POST['fe_woo_canton'])    ? sanitize_text_field(wp_unslash($_POST['fe_woo_canton']))    : '';
+        $distrito  = isset($_POST['fe_woo_distrito'])  ? sanitize_text_field(wp_unslash($_POST['fe_woo_distrito']))  : '';
+
+        if ($provincia === '' || $canton === '' || $distrito === '') {
+            wc_add_notice(__('Por favor seleccione provincia, cantón y distrito para la factura electrónica.', 'fe-woo'), 'error');
+        } elseif (!FE_Woo_CR_Locations::validate($provincia, $canton, $distrito)) {
+            wc_add_notice(__('La combinación de provincia, cantón y distrito no es válida.', 'fe-woo'), 'error');
+        }
+
+        $otras_senas = isset($_POST['fe_woo_otras_senas']) ? trim((string) wp_unslash($_POST['fe_woo_otras_senas'])) : '';
+        $otras_len = function_exists('mb_strlen') ? mb_strlen($otras_senas) : strlen($otras_senas);
+        if ($otras_senas === '') {
+            wc_add_notice(__('Por favor ingrese las otras señas para la factura electrónica.', 'fe-woo'), 'error');
+        } elseif ($otras_len < 5) {
+            wc_add_notice(__('Las otras señas deben tener al menos 5 caracteres.', 'fe-woo'), 'error');
+        } elseif ($otras_len > 250) {
+            wc_add_notice(__('Las otras señas no pueden exceder 250 caracteres.', 'fe-woo'), 'error');
         }
     }
 
@@ -361,6 +435,10 @@ class FE_Woo_Checkout {
                 $order->update_meta_data('_fe_woo_activity_code', sanitize_text_field($_POST['fe_woo_activity_code']));
             }
 
+            // Ubicación — persist codes only; names are resolved from the catalog
+            // when rendering. Mirror to user_meta for autocomplete on next purchase.
+            self::save_ubicacion_meta($order, $_POST);
+
             // Copy billing data to FE fields as fallback
             self::copy_billing_to_fe_fields($order);
         }
@@ -381,6 +459,10 @@ class FE_Woo_Checkout {
         $full_name     = $order->get_meta('_fe_woo_full_name');
         $invoice_email = $order->get_meta('_fe_woo_invoice_email');
         $phone         = $order->get_meta('_fe_woo_phone');
+        $provincia     = (string) $order->get_meta('_fe_woo_provincia');
+        $canton        = (string) $order->get_meta('_fe_woo_canton');
+        $distrito      = (string) $order->get_meta('_fe_woo_distrito');
+        $otras_senas   = (string) $order->get_meta('_fe_woo_otras_senas');
 
         ?>
         <div class="fe-woo-order-factura-fields" style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e5e5e5;">
@@ -440,6 +522,34 @@ class FE_Woo_Checkout {
                     <input type="text" name="fe_woo_activity_code" id="fe_woo_activity_code" value="<?php echo esc_attr($activity_code); ?>" pattern="\d{4}\.\d{1}" maxlength="6" style="width: 100%;" placeholder="<?php esc_attr_e('Ej: 1234.5', 'fe-woo'); ?>" title="<?php esc_attr_e('Formato requerido: 4 dígitos, punto, 1 dígito. Ejemplo: 1234.5', 'fe-woo'); ?>">
                     <span class="description"><?php esc_html_e('Formato: 4 dígitos, punto, 1 dígito (Ej: 1234.5)', 'fe-woo'); ?></span>
                 </p>
+
+                <div class="fe-woo-ubicacion-block"
+                     data-fe-cr-locations="1"
+                     data-initial-provincia="<?php echo esc_attr($provincia); ?>"
+                     data-initial-canton="<?php echo esc_attr($canton); ?>"
+                     data-initial-distrito="<?php echo esc_attr($distrito); ?>">
+
+                    <p class="form-field form-field-wide">
+                        <label for="fe_woo_provincia"><?php esc_html_e('Provincia:', 'fe-woo'); ?> <span class="required">*</span></label>
+                        <select name="fe_woo_provincia" id="fe_woo_provincia" data-fe-cr-role="provincia" style="width: 100%;"></select>
+                    </p>
+
+                    <p class="form-field form-field-wide">
+                        <label for="fe_woo_canton"><?php esc_html_e('Cantón:', 'fe-woo'); ?> <span class="required">*</span></label>
+                        <select name="fe_woo_canton" id="fe_woo_canton" data-fe-cr-role="canton" style="width: 100%;" disabled></select>
+                    </p>
+
+                    <p class="form-field form-field-wide">
+                        <label for="fe_woo_distrito"><?php esc_html_e('Distrito:', 'fe-woo'); ?> <span class="required">*</span></label>
+                        <select name="fe_woo_distrito" id="fe_woo_distrito" data-fe-cr-role="distrito" style="width: 100%;" disabled></select>
+                    </p>
+
+                    <p class="form-field form-field-wide">
+                        <label for="fe_woo_otras_senas"><?php esc_html_e('Otras Señas:', 'fe-woo'); ?> <span class="required">*</span></label>
+                        <textarea name="fe_woo_otras_senas" id="fe_woo_otras_senas" rows="3" maxlength="250" style="width: 100%;" placeholder="<?php esc_attr_e('Ej: 200m sur del parque, casa color blanco', 'fe-woo'); ?>"><?php echo esc_textarea($otras_senas); ?></textarea>
+                        <span class="description"><?php esc_html_e('Mínimo 5 caracteres, máximo 250.', 'fe-woo'); ?></span>
+                    </p>
+                </div>
             </div>
         </div>
         <?php
@@ -486,6 +596,13 @@ class FE_Woo_Checkout {
                 $order->update_meta_data('_fe_woo_phone', sanitize_text_field($_POST['fe_woo_phone']));
             }
 
+            // Ubicación
+            self::save_ubicacion_meta($order, $_POST);
+
+            // Mantener paridad con el flujo de checkout: rellenar desde facturación
+            // cualquier campo FE que quedó vacío.
+            self::copy_billing_to_fe_fields($order);
+
             $order->save();
         } else {
             // Checkbox not checked - remove factura requirement
@@ -524,6 +641,58 @@ class FE_Woo_Checkout {
     }
 
     /**
+     * Persist ubicacion fields (provincia/canton/distrito/otras_senas) to order
+     * meta and mirror to user_meta when there's a logged-in customer.
+     *
+     * Codes are normalized to the catalog padding format. Names are NOT stored
+     * — they are resolved from FE_Woo_CR_Locations whenever rendered.
+     *
+     * @param WC_Order $order
+     * @param array    $source POSTed data ($_POST or admin POST).
+     */
+    private static function save_ubicacion_meta($order, $source) {
+        if (!isset($source['fe_woo_provincia'], $source['fe_woo_canton'], $source['fe_woo_distrito'])) {
+            return;
+        }
+
+        $provincia = FE_Woo_CR_Locations::pad(sanitize_text_field(wp_unslash($source['fe_woo_provincia'])), 1);
+        $canton    = FE_Woo_CR_Locations::pad(sanitize_text_field(wp_unslash($source['fe_woo_canton'])),    2);
+        $distrito  = FE_Woo_CR_Locations::pad(sanitize_text_field(wp_unslash($source['fe_woo_distrito'])),  2);
+
+        if ($provincia === '' || $canton === '' || $distrito === '') {
+            return;
+        }
+
+        if (!FE_Woo_CR_Locations::validate($provincia, $canton, $distrito)) {
+            return;
+        }
+
+        $order->update_meta_data('_fe_woo_provincia', $provincia);
+        $order->update_meta_data('_fe_woo_canton',    $canton);
+        $order->update_meta_data('_fe_woo_distrito',  $distrito);
+
+        if (isset($source['fe_woo_otras_senas'])) {
+            $otras = trim((string) wp_unslash($source['fe_woo_otras_senas']));
+            $otras = function_exists('mb_substr') ? mb_substr($otras, 0, 250) : substr($otras, 0, 250);
+            $otras = sanitize_textarea_field($otras);
+            if ($otras !== '') {
+                $order->update_meta_data('_fe_woo_otras_senas', $otras);
+            }
+        }
+
+        $customer_id = $order->get_customer_id();
+        if ($customer_id) {
+            update_user_meta($customer_id, 'fe_woo_provincia', $provincia);
+            update_user_meta($customer_id, 'fe_woo_canton',    $canton);
+            update_user_meta($customer_id, 'fe_woo_distrito',  $distrito);
+            $stored_otras = (string) $order->get_meta('_fe_woo_otras_senas');
+            if ($stored_otras !== '') {
+                update_user_meta($customer_id, 'fe_woo_otras_senas', $stored_otras);
+            }
+        }
+    }
+
+    /**
      * Enqueue admin scripts
      *
      * @param string $hook Page hook
@@ -538,6 +707,16 @@ class FE_Woo_Checkout {
         if (!$screen || !in_array($screen->id, ['shop_order', 'woocommerce_page_wc-orders'])) {
             return;
         }
+
+        // CR ubicacion cascade for the order admin metabox.
+        wp_enqueue_script(
+            'fe-woo-cr-locations',
+            FE_WOO_PLUGIN_URL . 'assets/js/cr-locations.js',
+            ['jquery'],
+            FE_WOO_VERSION,
+            true
+        );
+        wp_localize_script('fe-woo-cr-locations', 'feWooCrLocations', FE_Woo_CR_Locations::get_localize_payload());
 
         // Add inline styles for factura electrónica fields
         wp_add_inline_style('wp-admin', '

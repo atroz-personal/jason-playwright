@@ -294,21 +294,16 @@ class FE_Woo_Queue {
 
         $table_name = $wpdb->prefix . self::$table_name;
 
-        $result = $wpdb->update(
-            $table_name,
-            [
-                'status' => self::STATUS_PROCESSING,
-                // TODO: Refactorear para usar una sola query raw en lugar de update() + query().
-                // $wpdb->update() no soporta expresiones SQL como "attempts + 1".
-                'attempts' => 0, // Placeholder — se sobreescribe con el incremento real abajo
-                'updated_at' => current_time('mysql'),
-            ],
-            ['id' => $queue_id]
-        );
-
-        // Actually increment attempts
-        $wpdb->query($wpdb->prepare(
-            "UPDATE $table_name SET attempts = attempts + 1 WHERE id = %d",
+        // Single raw query: $wpdb->update() no soporta expresiones SQL como
+        // "attempts + 1", así que antes hacíamos 2 queries (T-7 v1.19.0 fold-in).
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE $table_name
+             SET status = %s,
+                 attempts = attempts + 1,
+                 updated_at = %s
+             WHERE id = %d",
+            self::STATUS_PROCESSING,
+            current_time('mysql'),
             $queue_id
         ));
 
@@ -362,6 +357,37 @@ class FE_Woo_Queue {
         return self::update_status($queue_id, $status, [
             'error_message' => $error_message,
         ]);
+    }
+
+    /**
+     * Mark a queue item as "keep retrying until Hacienda accepts".
+     *
+     * Used when Hacienda itself rejected the document or hasn't issued a
+     * verdict yet. Unlike mark_failed, this resets the attempts counter
+     * so the queue never drops the row into STATUS_FAILED for something
+     * that's expected to be resolved by a config fix (wrong actividad,
+     * wrong ubicación, expired token, etc.). The operator's data fix is
+     * what moves the item forward; the queue just keeps handing it to the
+     * processor on each cron tick.
+     *
+     * @param int    $queue_id
+     * @param string $error_message
+     * @return bool
+     */
+    public static function mark_pending_hacienda($queue_id, $error_message) {
+        global $wpdb;
+        $table_name = $wpdb->prefix . self::$table_name;
+
+        return $wpdb->update(
+            $table_name,
+            [
+                'status'        => self::STATUS_RETRY,
+                'attempts'      => 0,
+                'error_message' => $error_message,
+                'updated_at'    => current_time('mysql'),
+            ],
+            ['id' => $queue_id]
+        ) !== false;
     }
 
     /**
@@ -596,6 +622,103 @@ class FE_Woo_Queue {
         }
 
         return $items;
+    }
+
+    /**
+     * Recover items varados en STATUS_PROCESSING.
+     *
+     * Cuando un cron tick se interrumpe (timeout de Pantheon, redeploy,
+     * fatal PHP), los items marcados `processing` por mark_processing()
+     * al inicio de process_item() no vuelven solos a `retry`. El transient
+     * lock fe_woo_queue_processing expira a los 5 min, pero los items
+     * quedan bloqueados indefinidamente, sin reintento.
+     *
+     * Este método se invoca al inicio de process_queue() para detectar
+     * y resetear esos items.
+     *
+     * @param int $threshold_minutes Items en processing por más tiempo se resetean.
+     * @return int Cantidad de items recuperados.
+     */
+    public static function recover_stale_processing_items($threshold_minutes = 10) {
+        global $wpdb;
+
+        $table_name = $wpdb->prefix . self::$table_name;
+        $threshold = gmdate('Y-m-d H:i:s', time() - ($threshold_minutes * 60));
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE $table_name
+             SET status = %s, updated_at = NOW()
+             WHERE status = %s AND updated_at < %s",
+            self::STATUS_RETRY,
+            self::STATUS_PROCESSING,
+            $threshold
+        ));
+
+        return (int) $result;
+    }
+
+    /**
+     * Cron-driven health check para detectar y notificar problemas operativos.
+     *
+     * Acciones:
+     *  1. Recover stale items varados en `processing` (>{$stale_threshold} min).
+     *  2. Contar items en `failed` con attempts > {$max_attempts}.
+     *  3. Si hay problemas → log + email al admin (rate-limited: 1x/día).
+     *
+     * Diseñado para correr como cron horario. Reusa `recover_stale_processing_items`
+     * (no es destructivo: solo cambia processing→retry para que el cron principal
+     * los reintente).
+     *
+     * @return array Resumen del checkeo: ['recovered', 'failed_permanent', 'notified'].
+     */
+    public static function health_check() {
+        $recovered = self::recover_stale_processing_items(10);
+
+        global $wpdb;
+        $table_name = $wpdb->prefix . self::$table_name;
+        $max_attempts = 5;
+        $failed_permanent = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM $table_name WHERE status = %s AND attempts >= %d",
+            self::STATUS_FAILED,
+            $max_attempts
+        ));
+
+        $notified = false;
+        if ($recovered > 0 || $failed_permanent > 0) {
+            $lock = 'fe_woo_queue_health_email_lock';
+            if (!get_transient($lock)) {
+                $admin_email = get_option('admin_email');
+                if ($admin_email) {
+                    $subject = sprintf(
+                        '[%s] Cola de Factura Electrónica requiere atención',
+                        wp_specialchars_decode(get_option('blogname'), ENT_QUOTES)
+                    );
+                    $body = "Resumen del health check:\n\n";
+                    if ($recovered > 0) {
+                        $body .= "- $recovered items recuperados de estado 'processing' (>10 min) → reagendados.\n";
+                    }
+                    if ($failed_permanent > 0) {
+                        $body .= "- $failed_permanent items en 'failed' con $max_attempts+ intentos (no se reintentarán automáticamente).\n";
+                    }
+                    $body .= "\nRevisa: " . admin_url('admin.php?page=wc-settings&tab=fe') . "\n";
+                    wp_mail($admin_email, $subject, $body);
+                    set_transient($lock, time(), DAY_IN_SECONDS);
+                    $notified = true;
+                }
+            }
+            if (function_exists('wc_get_logger')) {
+                wc_get_logger()->warning(
+                    sprintf('Queue health check: %d recovered, %d failed-permanent', $recovered, $failed_permanent),
+                    ['source' => 'fe-woo-queue']
+                );
+            }
+        }
+
+        return [
+            'recovered'        => $recovered,
+            'failed_permanent' => $failed_permanent,
+            'notified'         => $notified,
+        ];
     }
 
     /**

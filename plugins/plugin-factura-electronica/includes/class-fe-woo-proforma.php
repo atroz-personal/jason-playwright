@@ -47,12 +47,6 @@ class FE_Woo_Proforma {
         // Auto-send proforma email whenever an order reaches proforma status (covers all contexts)
         add_action('woocommerce_order_status_changed', [__CLASS__, 'auto_send_proforma_email_on_status_change'], 20, 4);
 
-        // Register email class
-        add_filter('woocommerce_email_classes', [__CLASS__, 'register_proforma_email']);
-
-        // Load email template
-        add_filter('woocommerce_locate_template', [__CLASS__, 'locate_proforma_email_template'], 10, 3);
-
         // Add custom order action to resend proforma email
         add_filter('woocommerce_order_actions', [__CLASS__, 'add_resend_proforma_email_action']);
         add_action('woocommerce_order_action_send_proforma_email', [__CLASS__, 'send_proforma_email_action']);
@@ -161,46 +155,6 @@ class FE_Woo_Proforma {
                 );
             }
         }
-    }
-
-    /**
-     * Register proforma email class
-     *
-     * @param array $email_classes Existing email classes
-     * @return array Modified email classes
-     */
-    public static function register_proforma_email($email_classes) {
-        // Load email class
-        require_once FE_WOO_PLUGIN_DIR . 'includes/emails/class-wc-proforma-email.php';
-
-        // Add to email classes array
-        $email_classes['WC_Proforma_Email'] = new WC_Proforma_Email();
-
-        return $email_classes;
-    }
-
-    /**
-     * Locate proforma email template
-     *
-     * @param string $template Template path
-     * @param string $template_name Template name
-     * @param string $template_path Template path in theme
-     * @return string Modified template path
-     */
-    public static function locate_proforma_email_template($template, $template_name, $template_path) {
-        // Check if this is a proforma email template
-        if (strpos($template_name, 'customer-proforma') === false) {
-            return $template;
-        }
-
-        // Use plugin template
-        $plugin_template = FE_WOO_PLUGIN_DIR . 'templates/emails/' . $template_name;
-
-        if (file_exists($plugin_template)) {
-            return $plugin_template;
-        }
-
-        return $template;
     }
 
     /**

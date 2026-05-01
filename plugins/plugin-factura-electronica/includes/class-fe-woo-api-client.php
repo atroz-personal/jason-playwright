@@ -467,26 +467,35 @@ class FE_Woo_API_Client {
     }
 
     /**
-     * Query invoice status from Hacienda
+     * Query invoice status from Hacienda (v4.4).
      *
-     * NOTE: The consultation endpoint currently requires AWS Signature v4 authentication,
-     * which is different from the OAuth authentication used for sending invoices.
-     * This functionality is not yet fully implemented.
+     * Uses GET {base}/recepcion/v1/recepcion/{clave} with the same OAuth
+     * bearer as the POST reception endpoint. When Hacienda has finished
+     * processing, the JSON body includes `ind-estado` (aceptado/rechazado)
+     * and `respuesta-xml`, a base64-encoded signed MensajeHacienda — the
+     * AHC-{clave}.xml file. Before processing completes, the same endpoint
+     * returns only `ind-estado: recibido` and no XML, so callers must poll.
      *
-     * @param string $invoice_key Invoice identification key
+     * @param string $invoice_key 50-digit clave
      * @return array Result with invoice status
      */
     public function query_invoice_status($invoice_key) {
-        $endpoint = $this->config->get_api_endpoint('consultation');
+        // Consultation lives at GET {base}/recepcion/v1/recepcion/{clave} on
+        // the same OAuth-protected host as the POST reception endpoint. The
+        // separate /consulta/v1 host sits behind AWS API Gateway with IAM
+        // auth (SigV4) — we don't use it.
+        $endpoint = $this->config->get_api_endpoint('reception');
 
         if (empty($endpoint)) {
             return [
                 'success' => false,
-                'message' => __('Consultation endpoint not configured', 'fe-woo'),
+                'message' => __('Reception endpoint not configured', 'fe-woo'),
             ];
         }
 
-        $endpoint .= '/recepcion/' . $invoice_key;
+        // Path is {base}/recepcion/v1/recepcion/{clave}. get_api_endpoint
+        // already returns up to `/recepcion/v1`; we append `/recepcion/{clave}`.
+        $endpoint = rtrim($endpoint, '/') . '/recepcion/' . $invoice_key;
 
         $response = $this->make_request('GET', $endpoint);
 
@@ -507,17 +516,6 @@ class FE_Woo_API_Client {
                 'success' => true,
                 'status' => isset($response_data['ind-estado']) ? $response_data['ind-estado'] : 'unknown',
                 'data' => $response_data,
-            ];
-        }
-
-        // Handle 403 Forbidden - likely requires AWS Signature v4 authentication
-        if ($status_code === 403) {
-            return [
-                'success' => false,
-                'message' => __('Status consultation requires additional authentication configuration. Contact Hacienda for consultation API credentials.', 'fe-woo'),
-                'status_code' => $status_code,
-                'data' => $response_data,
-                'note' => 'Consultation endpoint requires AWS Signature v4 authentication',
             ];
         }
 

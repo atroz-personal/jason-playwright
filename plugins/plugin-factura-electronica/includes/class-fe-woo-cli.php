@@ -262,6 +262,386 @@ class FE_Woo_CLI {
         }
         WP_CLI::line('');
     }
+
+    /**
+     * Generate, sign, and validate an invoice XML locally without sending it to Hacienda.
+     *
+     * ## OPTIONS
+     *
+     * --order=<id>
+     * : WooCommerce order ID.
+     *
+     * [--type=<doc>]
+     * : Document type: factura, tiquete, nota_credito, nota_debito. Default: factura.
+     *
+     * [--emisor=<id>]
+     * : Emisor ID. Default: order's mapped emisor or parent emisor.
+     *
+     * ## EXAMPLES
+     *
+     *     wp fe-woo sign_test --order=1504
+     *     wp fe-woo sign_test --order=1504 --type=tiquete
+     *     wp fe-woo sign_test --order=1504 --force-production
+     *
+     * @when after_wp_load
+     */
+    public function sign_test($args, $assoc_args) {
+        // sign_test writes a real signed legal invoice to disk. Refuse to run
+        // on production unless the operator explicitly opts in, otherwise
+        // a stray CLI on a live container creates fiscal artefacts.
+        $is_prod = defined('WP_ENV') && in_array(WP_ENV, ['production', 'live'], true);
+        if ($is_prod && empty($assoc_args['force-production'])) {
+            WP_CLI::error('sign_test rechazado en producción. Usa --force-production si es intencional.');
+        }
+
+        $order_id = isset($assoc_args['order']) ? (int) $assoc_args['order'] : 0;
+        if ($order_id <= 0) {
+            WP_CLI::error('Debes pasar --order=<id>.');
+        }
+        $type = isset($assoc_args['type']) ? (string) $assoc_args['type'] : 'factura';
+        $emisor_id = isset($assoc_args['emisor']) ? (int) $assoc_args['emisor'] : null;
+
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            WP_CLI::error('Orden no encontrada: ' . $order_id);
+        }
+
+        $emisor = null;
+        if ($emisor_id) {
+            $emisor = FE_Woo_Emisor_Manager::get_emisor($emisor_id);
+        }
+        if (!$emisor) {
+            $emisor = FE_Woo_Emisor_Manager::get_parent_emisor();
+        }
+        if (!$emisor) {
+            WP_CLI::error('No hay emisor configurado.');
+        }
+        if (empty($emisor->certificate_path) || empty($emisor->certificate_pin)) {
+            WP_CLI::error(sprintf('El emisor "%s" no tiene certificado o PIN configurado.', $emisor->nombre_legal));
+        }
+
+        WP_CLI::line("Orden #{$order_id} | Tipo: {$type} | Emisor: {$emisor->nombre_legal}");
+
+        $result = FE_Woo_Factura_Generator::generate_from_order($order, $type, (int) $emisor->id);
+        if (!$result['success']) {
+            WP_CLI::error('Error al generar XML: ' . ($result['error'] ?? 'desconocido'));
+        }
+        $unsigned = $result['xml'];
+        $clave = $result['clave'];
+
+        // wp_tempnam creates a unique, 0600-able file inside the WP upload
+        // private dir (not /tmp), so concurrent runs don't collide and the
+        // output isn't world-readable on shared hosts. Shutdown cleanup.
+        $unsigned_path = wp_tempnam('fe_woo_unsigned_');
+        file_put_contents($unsigned_path, $unsigned);
+        @chmod($unsigned_path, 0600);
+        WP_CLI::line("  Unsigned XML: {$unsigned_path} (" . strlen($unsigned) . ' bytes)');
+
+        try {
+            $signed = FE_Woo_XML_Signer::sign($unsigned, $emisor->certificate_path, $emisor->certificate_pin);
+        } catch (Exception $e) {
+            WP_CLI::error('Error al firmar: ' . $e->getMessage());
+        }
+        $signed_path = wp_tempnam('fe_woo_signed_');
+        file_put_contents($signed_path, $signed);
+        @chmod($signed_path, 0600);
+        WP_CLI::line("  Signed XML:   {$signed_path} (" . strlen($signed) . ' bytes)');
+
+        register_shutdown_function(function () use ($unsigned_path, $signed_path) {
+            @unlink($unsigned_path);
+            @unlink($signed_path);
+        });
+        WP_CLI::line("  Clave:        {$clave}");
+
+        $validation = FE_Woo_XML_Validator::validate($signed);
+        if ($validation['valid']) {
+            WP_CLI::success('VALID — el XML firmado pasa el XSD v4.4.');
+        } else {
+            WP_CLI::warning('Validación XSD falló (' . count($validation['errors']) . ' error(es)):');
+            foreach (array_slice($validation['errors'], 0, 5) as $i => $err) {
+                WP_CLI::line("    [{$i}] " . substr($err, 0, 300));
+            }
+        }
+    }
+
+    /**
+     * Bulk re-execute facturas: purge queue, wipe existing invoices and re-queue all matching orders.
+     *
+     * DESTRUCTIVE operation. Deletes every row in wp_fe_woo_factura_queue, then for each matching
+     * order deletes the stored XML/PDF/acuse files, clears invoice metadata and inserts a fresh
+     * pending entry in the queue. The next queue processor run (cron or `wp fe-woo status` /
+     * manual execution) will regenerate everything from scratch.
+     *
+     * ## OPTIONS
+     *
+     * [--status=<csv>]
+     * : Comma-separated WooCommerce order statuses to target. Default: completed.
+     *
+     * [--batch-size=<n>]
+     * : How many orders to process per page. Default: 50.
+     *
+     * [--dry-run]
+     * : Print what would happen without changing anything.
+     *
+     * [--yes]
+     * : Skip the confirmation prompt (for automation).
+     *
+     * [--force-production]
+     * : Required to run on production/live environments.
+     *
+     * ## EXAMPLES
+     *
+     *     wp fe-woo reexecute_all --dry-run
+     *     wp fe-woo reexecute_all --yes
+     *     wp fe-woo reexecute_all --status=completed,processing --batch-size=100 --yes
+     *
+     * @when after_wp_load
+     */
+    public function reexecute_all($args, $assoc_args) {
+        global $wpdb;
+
+        $dry_run = isset($assoc_args['dry-run']);
+        $statuses_csv = (string) \WP_CLI\Utils\get_flag_value($assoc_args, 'status', 'completed');
+        $statuses = array_values(array_filter(array_map('trim', explode(',', $statuses_csv))));
+        $batch_size = max(1, (int) \WP_CLI\Utils\get_flag_value($assoc_args, 'batch-size', 50));
+
+        if (empty($statuses)) {
+            WP_CLI::error('Debes pasar al menos un status en --status.');
+        }
+
+        $is_prod = defined('WP_ENV') && in_array(WP_ENV, ['production', 'live'], true);
+        if ($is_prod && !$dry_run && empty($assoc_args['force-production'])) {
+            WP_CLI::error('reexecute_all está bloqueado en producción. Usa --force-production si realmente quieres hacer un reset masivo.');
+        }
+
+        // Count target orders (paginate=true returns {total, orders, ...}).
+        $count_query = wc_get_orders([
+            'status'   => $statuses,
+            'type'     => 'shop_order',
+            'limit'    => 1,
+            'paginate' => true,
+            'return'   => 'ids',
+        ]);
+        $total_orders = (int) $count_query->total;
+
+        $queue_table = $wpdb->prefix . 'fe_woo_factura_queue';
+        $queue_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$queue_table}");
+
+        WP_CLI::line('');
+        WP_CLI::line('==============================================');
+        WP_CLI::line('  FE WOO - RE-EJECUCIÓN MASIVA               ');
+        WP_CLI::line('==============================================');
+        WP_CLI::line('');
+        WP_CLI::line('  Entorno: ' . (defined('WP_ENV') ? WP_ENV : 'desconocido'));
+        WP_CLI::line('  Status objetivo: ' . implode(', ', $statuses));
+        WP_CLI::line('  Órdenes a re-encolar: ' . number_format_i18n($total_orders));
+        WP_CLI::line('  Items actualmente en la cola: ' . number_format_i18n($queue_count));
+        WP_CLI::line('  Tamaño de batch: ' . $batch_size);
+        WP_CLI::line('  Modo: ' . ($dry_run ? 'DRY-RUN (no se cambia nada)' : 'EJECUCIÓN REAL'));
+        WP_CLI::line('');
+
+        if ($total_orders === 0 && $queue_count === 0) {
+            WP_CLI::success('No hay nada que hacer.');
+            return;
+        }
+
+        if (!$dry_run) {
+            if (empty($assoc_args['yes'])) {
+                WP_CLI::confirm(sprintf(
+                    'Esto eliminará %d item(s) en cola y borrará archivos + metadata de %d orden(es). ¿Continuar?',
+                    $queue_count,
+                    $total_orders
+                ), $assoc_args);
+            }
+        }
+
+        // 1. Purge queue table.
+        if ($dry_run) {
+            WP_CLI::line(sprintf('[dry-run] Se eliminarían %d item(s) de %s.', $queue_count, $queue_table));
+        } else {
+            $deleted = $wpdb->query("DELETE FROM {$queue_table}");
+            WP_CLI::line(sprintf('✓ Cola vaciada (%d fila(s) eliminadas).', (int) $deleted));
+            delete_transient('fe_woo_queue_processing');
+        }
+        WP_CLI::line('');
+
+        if ($total_orders === 0) {
+            WP_CLI::success('Cola vaciada. No hay órdenes que re-encolar.');
+            return;
+        }
+
+        // 2. Iterate orders in batches with a progress bar.
+        $progress = \WP_CLI\Utils\make_progress_bar(
+            $dry_run ? 'Dry-run órdenes' : 'Re-encolando órdenes',
+            $total_orders
+        );
+
+        $success = 0;
+        $failed = 0;
+        $errors = [];
+        $page = 1;
+
+        do {
+            $page_result = wc_get_orders([
+                'status'   => $statuses,
+                'type'     => 'shop_order',
+                'limit'    => $batch_size,
+                'page'     => $page,
+                'orderby'  => 'ID',
+                'order'    => 'ASC',
+                'paginate' => true,
+                'return'   => 'ids',
+            ]);
+
+            $order_ids = $page_result->orders;
+
+            foreach ($order_ids as $order_id) {
+                if ($dry_run) {
+                    $progress->tick();
+                    $success++;
+                    continue;
+                }
+
+                try {
+                    $result = FE_Woo_Queue_Processor::reexecute_invoice((int) $order_id);
+                    if (!empty($result['success'])) {
+                        $success++;
+                    } else {
+                        $failed++;
+                        $errors[] = sprintf('Orden #%d: %s', $order_id, $result['message'] ?? 'error desconocido');
+                    }
+                } catch (\Throwable $e) {
+                    $failed++;
+                    $errors[] = sprintf('Orden #%d: %s', $order_id, $e->getMessage());
+                }
+
+                $progress->tick();
+            }
+
+            $page++;
+
+            // Free memory between batches — WooCommerce caches order objects per request.
+            if (function_exists('wp_cache_flush_runtime')) {
+                wp_cache_flush_runtime();
+            }
+        } while ($page <= (int) $page_result->max_num_pages);
+
+        $progress->finish();
+
+        WP_CLI::line('');
+        WP_CLI::line('----------------------------------------------');
+        WP_CLI::line('  RESUMEN');
+        WP_CLI::line('----------------------------------------------');
+        WP_CLI::line('  Éxitos: ' . $success);
+        WP_CLI::line('  Fallos: ' . $failed);
+
+        if (!empty($errors)) {
+            WP_CLI::line('');
+            WP_CLI::warning('Se encontraron errores en las siguientes órdenes:');
+            foreach (array_slice($errors, 0, 20) as $err) {
+                WP_CLI::line('  - ' . $err);
+            }
+            if (count($errors) > 20) {
+                WP_CLI::line(sprintf('  ... y %d error(es) más.', count($errors) - 20));
+            }
+        }
+
+        WP_CLI::line('');
+        if ($dry_run) {
+            WP_CLI::success('DRY-RUN completado. Ejecuta sin --dry-run para aplicar los cambios.');
+        } elseif ($failed === 0) {
+            WP_CLI::success('Re-ejecución completada. Las órdenes se procesarán en el próximo ciclo de cola.');
+        } else {
+            WP_CLI::warning('Re-ejecución completada con errores. Revisa el listado anterior.');
+        }
+    }
+
+    /**
+     * Backfill the signed MensajeHacienda (AHC-) XML for orders that already
+     * have a factura stored but no acuse XML on disk. Queries Hacienda's
+     * consulta endpoint per clave, decodes `respuesta-xml`, and writes it as
+     * AHC-{clave}.xml.
+     *
+     * Safe to re-run. Skips orders that already have the file.
+     *
+     * ## OPTIONS
+     *
+     * [--status=<csv>]
+     * : Comma-separated WooCommerce order statuses to target. Default: completed,processing.
+     *
+     * [--limit=<n>]
+     * : Max orders to process. Default: no limit.
+     *
+     * [--sleep=<seconds>]
+     * : Seconds to wait between API calls to avoid rate-limits. Default: 1.
+     *
+     * [--dry-run]
+     * : List orders that would be processed without contacting Hacienda.
+     *
+     * @when after_wp_load
+     */
+    public function backfill_acuse_xml($args, $assoc_args) {
+        $dry_run = isset($assoc_args['dry-run']);
+        $statuses_csv = (string) \WP_CLI\Utils\get_flag_value($assoc_args, 'status', 'completed,processing');
+        $statuses = array_values(array_filter(array_map('trim', explode(',', $statuses_csv))));
+        $limit = (int) \WP_CLI\Utils\get_flag_value($assoc_args, 'limit', 0);
+        $sleep = max(0, (int) \WP_CLI\Utils\get_flag_value($assoc_args, 'sleep', 1));
+
+        $orders = wc_get_orders([
+            'status'   => $statuses,
+            'limit'    => $limit > 0 ? $limit : -1,
+            'meta_key' => '_fe_woo_clave',
+            'meta_compare' => 'EXISTS',
+            'return'   => 'objects',
+        ]);
+
+        if (empty($orders)) {
+            WP_CLI::success('No hay órdenes con clave de factura almacenada.');
+            return;
+        }
+
+        WP_CLI::line(sprintf('Evaluando %d órdenes...', count($orders)));
+        $saved = 0; $skipped = 0; $failed = 0;
+        $client = $dry_run ? null : new FE_Woo_API_Client();
+
+        foreach ($orders as $order) {
+            $order_id = $order->get_id();
+            $clave = $order->get_meta('_fe_woo_clave');
+            if (empty($clave)) { $skipped++; continue; }
+
+            if (FE_Woo_Document_Storage::get_acuse_xml_path($order_id, $clave)) {
+                $skipped++;
+                continue;
+            }
+
+            if ($dry_run) {
+                WP_CLI::line(sprintf('  [dry] #%d %s', $order_id, $clave));
+                continue;
+            }
+
+            try {
+                $result = $client->query_invoice_status($clave);
+            } catch (Exception $e) {
+                WP_CLI::warning(sprintf('#%d query exception: %s', $order_id, $e->getMessage()));
+                $failed++;
+                continue;
+            }
+
+            if (FE_Woo_Queue_Processor::save_acuse_xml_from_response($order_id, $clave, $result)) {
+                WP_CLI::line(sprintf('  ✓ #%d saved', $order_id));
+                $saved++;
+            } else {
+                $state = isset($result['data']['ind-estado']) ? $result['data']['ind-estado'] : (isset($result['status_code']) ? 'HTTP ' . $result['status_code'] : 'no-xml');
+                WP_CLI::line(sprintf('  · #%d no XML yet (%s)', $order_id, $state));
+                $failed++;
+            }
+
+            if ($sleep > 0) { sleep($sleep); }
+        }
+
+        WP_CLI::line('');
+        WP_CLI::success(sprintf('Backfill: %d guardado(s), %d sin XML disponible, %d saltado(s).', $saved, $failed, $skipped));
+    }
 }
 
 // Register WP-CLI commands if available

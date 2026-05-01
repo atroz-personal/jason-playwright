@@ -32,6 +32,65 @@ class FE_Woo_Settings {
 
         // AJAX handler for testing emisor connection
         add_action('wp_ajax_fe_woo_test_emisor_connection', [__CLASS__, 'ajax_test_emisor_connection']);
+
+        // Admin notice para cert SINPE próximo a expirar / expirado (T-3 v1.19.0).
+        add_action('admin_notices', [__CLASS__, 'maybe_render_cert_expiration_notice']);
+    }
+
+    /**
+     * Render an admin notice when the SINPE certificate is close to expiring
+     * or has already expired. Shown only to users with the manage_woocommerce
+     * capability, on every wp-admin page.
+     *
+     * Tres umbrales:
+     *   ≤ 30 días → notice-warning amarillo.
+     *   ≤ 7 días  → notice-error rojo (mismo cuerpo, urgencia mayor).
+     *   expirado  → notice-error con texto distinto.
+     */
+    public static function maybe_render_cert_expiration_notice() {
+        if (!current_user_can('manage_woocommerce')) {
+            return;
+        }
+        if (!class_exists('FE_Woo_Certificate_Handler')) {
+            return;
+        }
+        $status = FE_Woo_Certificate_Handler::get_cached_status();
+        $code   = isset($status['status']) ? $status['status'] : '';
+
+        $settings_url = admin_url('admin.php?page=wc-settings&tab=fe');
+        $upload_link  = sprintf(
+            '<a href="%s">%s</a>',
+            esc_url($settings_url),
+            esc_html__('Subir nuevo certificado →', 'fe-woo')
+        );
+
+        if ($code === 'invalid'
+            && isset($status['message'])
+            && stripos($status['message'], 'expirado') !== false) {
+            $msg = sprintf(
+                '<strong>%s</strong> %s &nbsp; %s',
+                esc_html__('Certificado SINPE EXPIRADO.', 'fe-woo'),
+                esc_html__('Los comprobantes electrónicos están fallando.', 'fe-woo'),
+                $upload_link
+            );
+            printf('<div class="notice notice-error"><p>%s</p></div>', $msg);
+            return;
+        }
+
+        if ($code === 'expiring' && isset($status['days_until_expiry'])) {
+            $days  = (int) $status['days_until_expiry'];
+            $level = ($days <= 7) ? 'notice-error' : 'notice-warning';
+            $msg   = sprintf(
+                '<strong>%s</strong> &nbsp; %s',
+                sprintf(
+                    /* translators: %d days remaining until cert expiration */
+                    esc_html__('El certificado SINPE expira en %d días.', 'fe-woo'),
+                    $days
+                ),
+                $upload_link
+            );
+            printf('<div class="notice %s"><p>%s</p></div>', esc_attr($level), $msg);
+        }
     }
 
     /**
@@ -861,12 +920,13 @@ class FE_Woo_Settings {
                 'custom_attributes' => ['required' => 'required', 'pattern' => '[0-9]+'],
             ],
             [
-                'name'     => __('Nombre Comercial', 'fe-woo'),
-                'type'     => 'text',
-                'desc'     => __('Nombre comercial de la empresa (opcional).', 'fe-woo'),
-                'desc_tip' => true,
-                'id'       => 'nombre_comercial',
-                'value'    => $has_data && $emisor->nombre_comercial ? $emisor->nombre_comercial : '',
+                'name'              => __('Nombre Comercial', 'fe-woo'),
+                'type'              => 'text',
+                'desc'              => __('Nombre comercial de la empresa (máx 80 caracteres).', 'fe-woo'),
+                'desc_tip'          => true,
+                'id'                => 'nombre_comercial',
+                'value'             => $has_data && $emisor->nombre_comercial ? $emisor->nombre_comercial : '',
+                'custom_attributes' => ['required' => 'required', 'maxlength' => '80'],
             ],
             [
                 'type' => 'sectionend',

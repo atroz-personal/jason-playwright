@@ -314,6 +314,20 @@ class FE_Woo_Nota_Manager {
             $nota_clave = $result['clave'];
             $nota_xml = $result['xml'];
 
+            // Sign note XML with emisor's XAdES-EPES certificate before validation.
+            try {
+                $nota_xml = FE_Woo_XML_Signer::sign($nota_xml, $emisor->certificate_path, $emisor->certificate_pin);
+            } catch (Exception $e) {
+                FE_Woo_XML_Signer::dump_unsigned_xml($order_id, $nota_clave, $result['xml']);
+                throw new Exception('Error al firmar nota: ' . $e->getMessage());
+            }
+
+            // Validate XML against Hacienda v4.4 XSD before submission.
+            $validation = FE_Woo_XML_Validator::validate($nota_xml);
+            if (!$validation['valid']) {
+                throw new Exception('XML inválido vs XSD v4.4: ' . implode(' | ', $validation['errors']));
+            }
+
             // Save XML file
             FE_Woo_Document_Storage::save_xml($order_id, $nota_xml, $nota_clave);
 
@@ -334,9 +348,6 @@ class FE_Woo_Nota_Manager {
             $api_client = new FE_Woo_API_Client();
             $hacienda_response = $api_client->send_invoice_with_emisor($nota_xml, $emisor);
 
-            // Initialize mensaje receptor clave
-            $mensaje_receptor_clave = null;
-
             if ($hacienda_response['success']) {
                 // Save Hacienda response as JSON (acuse)
                 $acuse_result = FE_Woo_Document_Storage::save_acuse($order_id, $hacienda_response, $nota_clave);
@@ -344,29 +355,10 @@ class FE_Woo_Nota_Manager {
                     $order->update_meta_data('_fe_woo_nota_' . $nota_clave . '_acuse_file_path', $acuse_result['file_path']);
                 }
 
-                // Generate Mensaje Receptor XML
-                $mensaje_result = FE_Woo_Mensaje_Receptor::generate_mensaje_receptor(
-                    $order,
-                    $nota_clave,
-                    $hacienda_response,
-                    $note_type
-                );
-
-                if ($mensaje_result['success']) {
-                    $mensaje_receptor_clave = $mensaje_result['clave'];
-
-                    $mensaje_save_result = FE_Woo_Document_Storage::save_mensaje_receptor(
-                        $order_id,
-                        $mensaje_result['xml'],
-                        $mensaje_result['clave']
-                    );
-
-                    if ($mensaje_save_result['success']) {
-                        $order->update_meta_data('_fe_woo_nota_' . $nota_clave . '_mensaje_receptor_clave', $mensaje_result['clave']);
-                        $order->update_meta_data('_fe_woo_nota_' . $nota_clave . '_mensaje_receptor_xml', $mensaje_result['xml']);
-                        $order->update_meta_data('_fe_woo_nota_' . $nota_clave . '_mensaje_receptor_file_path', $mensaje_save_result['file_path']);
-                    }
-                }
+                // Persist the signed MensajeHacienda (AHC-) if Hacienda
+                // returned it with the POST response; otherwise the
+                // consulta poll will pick it up on the next run.
+                FE_Woo_Queue_Processor::save_acuse_xml_from_response($order_id, $nota_clave, $hacienda_response);
 
                 $order->add_order_note(
                     sprintf(
@@ -405,7 +397,6 @@ class FE_Woo_Nota_Manager {
                 'pdf_path' => isset($document_paths['pdf']) ? $document_paths['pdf'] : null,
                 'hacienda_sent' => $hacienda_response['success'],
                 'hacienda_status' => $hacienda_response['success'] ? 'sent' : 'failed',
-                'mensaje_receptor_clave' => $mensaje_receptor_clave,
             ];
 
             $order->update_meta_data('_fe_woo_notas', $notas);
@@ -613,58 +604,34 @@ class FE_Woo_Nota_Manager {
     /**
      * Send nota de crédito/débito email to customer with document attachments
      *
+     * Uses WC_Nota_Email (extends WC_Email) for branded HTML emails
+     * with WooCommerce header/footer and order details.
+     *
      * @param WC_Order $order Order object
      * @param string   $clave Nota clave
      * @param string   $note_type 'nota_credito' or 'nota_debito'
      */
     private static function send_nota_email($order, $clave, $note_type = 'nota_credito') {
-        $email = $order->get_billing_email();
-
-        if (empty($email)) {
-            self::log(sprintf('No billing email found for order #%d, skipping nota email', $order->get_id()));
-            return;
-        }
-
         $note_label = ($note_type === 'nota_credito') ? 'Nota de Crédito' : 'Nota de Débito';
-
-        $subject = sprintf(
-            __('%s #%s - %s', 'fe-woo'),
-            $note_label,
-            $order->get_order_number(),
-            get_bloginfo('name')
-        );
-
-        $message = sprintf(
-            __("Estimado/a %s,\n\nAdjunto encontrará su %s.\n\nClave: %s\nNúmero de Orden: %s\n\nGracias.\n\n%s", 'fe-woo'),
-            $order->get_billing_first_name(),
-            $note_label,
-            $clave,
-            $order->get_order_number(),
-            get_bloginfo('name')
-        );
-
-        $headers = ['Content-Type: text/plain; charset=UTF-8'];
+        $order_id = $order->get_id();
 
         // Get document paths from storage
         $attachments = [];
-        $order_id = $order->get_id();
         $document_paths = FE_Woo_Document_Storage::get_document_paths($order_id, $clave);
 
-        self::log(sprintf('Preparing %s email for order #%d to %s', $note_label, $order_id, $email));
+        self::log(sprintf('Preparing %s email for order #%d', $note_label, $order_id));
 
         // Attach PDF file
-        if (!empty($document_paths['pdf'])) {
+        if (!empty($document_paths['pdf']) && file_exists($document_paths['pdf'])) {
             $attachments[] = $document_paths['pdf'];
         }
 
-        // Attach XML file
-        if (!empty($document_paths['xml'])) {
+        // Attach the signed nota XML plus the Acuse de Hacienda (AHC).
+        if (!empty($document_paths['xml']) && file_exists($document_paths['xml'])) {
             $attachments[] = $document_paths['xml'];
         }
-
-        // Attach Mensaje Receptor XML
-        if (!empty($document_paths['mensaje_receptor'])) {
-            $attachments[] = $document_paths['mensaje_receptor'];
+        if (!empty($document_paths['acuse_xml']) && file_exists($document_paths['acuse_xml'])) {
+            $attachments[] = $document_paths['acuse_xml'];
         }
 
         // Skip if no attachments found
@@ -673,21 +640,33 @@ class FE_Woo_Nota_Manager {
             return;
         }
 
-        // Send email
-        $email_result = wp_mail($email, $subject, $message, $headers, $attachments);
+        // Send via WC_Nota_Email (branded HTML template)
+        $mailer = WC()->mailer();
+        $emails = $mailer->get_emails();
 
-        if ($email_result) {
-            self::log(sprintf('%s email sent to %s for order #%d with %d attachments', $note_label, $email, $order_id, count($attachments)));
-            $order->add_order_note(
-                sprintf(
-                    __('Email de %s enviado a %s con %d adjuntos', 'fe-woo'),
-                    $note_label,
-                    $email,
-                    count($attachments)
-                )
-            );
-        } else {
-            self::log(sprintf('FAILED to send %s email to %s for order #%d', $note_label, $email, $order_id), 'error');
+        if (!isset($emails['WC_Nota_Email'])) {
+            self::log(sprintf('WC_Nota_Email class not found — cannot send %s email for order #%d', $note_label, $order_id), 'error');
+            return;
         }
+
+        // Guard: ensure there is a recipient before sending
+        // Uses same logic as WC_Nota_Email::get_nota_recipient() — fiscal email takes priority
+        $recipient = $order->get_meta('_fe_woo_invoice_email') ?: $order->get_billing_email();
+        if (empty($recipient)) {
+            self::log(sprintf('No recipient email found for order #%d — skipping %s email', $order_id, $note_label), 'error');
+            return;
+        }
+
+        $emails['WC_Nota_Email']->trigger($order_id, $order, $clave, $note_type, $attachments);
+        self::log(sprintf('%s email triggered for %s on order #%d with %d attachments (delivery depends on mail server)', $note_label, $recipient, $order_id, count($attachments)));
+        $order->add_order_note(
+            sprintf(
+                /* translators: %1$s: note label, %2$s: recipient email, %3$d: attachment count */
+                __('Email de %1$s programado para %2$s con %3$d adjuntos', 'fe-woo'),
+                $note_label,
+                $recipient,
+                count($attachments)
+            )
+        );
     }
 }

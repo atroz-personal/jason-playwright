@@ -3,7 +3,7 @@
  * Plugin Name: Factura Electronica Para WooCommerce
  * Plugin URI: https://example.com
  * Description: Connecta las ordenes de Woo con Factura Electronica Costa Rica
- * Version: 1.0.0
+ * Version: 1.21.0
  * Author: Jason Acuna
  * Author URI: https://example.com
  * Text Domain: fe-woo
@@ -22,10 +22,15 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants.
-define('FE_WOO_VERSION', '1.2.1');
+define('FE_WOO_VERSION', '1.21.0');
 define('FE_WOO_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('FE_WOO_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('FE_WOO_PLUGIN_BASENAME', plugin_basename(__FILE__));
+
+// Composer autoload (xmlseclibs, tcpdf, dompdf, ...).
+if (file_exists(FE_WOO_PLUGIN_DIR . 'vendor/autoload.php')) {
+    require_once FE_WOO_PLUGIN_DIR . 'vendor/autoload.php';
+}
 
 /**
  * Check if WooCommerce is active
@@ -44,40 +49,6 @@ function fe_woo_woocommerce_missing_notice() {
         <p><?php esc_html_e('Factura Electrónica para WooCommerce requiere que WooCommerce esté instalado y activo.', 'fe-woo'); ?></p>
     </div>
     <?php
-}
-
-/**
- * IMPORTANTE: No necesitamos agregar tabs manualmente porque WooCommerce
- * ya los crea automáticamente desde la tabla wc_tax_rate_classes
- */
-add_filter('woocommerce_get_settings_tax', 'fe_woo_add_cabys_tax_settings', 10, 2);
-
-function fe_woo_add_cabys_tax_settings($settings, $current_section) {
-    global $wpdb;
-
-    $tax_class = $current_section;
-
-    // Check if this tax class exists in our tax rates table
-    $exists = $wpdb->get_var($wpdb->prepare(
-        "SELECT COUNT(*) FROM {$wpdb->prefix}woocommerce_tax_rates WHERE tax_rate_class = %s",
-        $tax_class
-    ));
-
-    if (!$exists) {
-        return $settings;
-    }
-
-    // Check if this is a CABYS code (starts with digits)
-    if (!preg_match('/^\d{4,}/', $tax_class)) {
-        return $settings;
-    }
-
-    // Return tax_rates field for this CABYS section
-    return [
-        [
-            'type' => 'tax_rates',
-        ],
-    ];
 }
 
 /**
@@ -153,6 +124,8 @@ function fe_woo_init() {
     // Load queue management classes
     require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-queue.php';
     require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-factura-generator.php';
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-xml-validator.php';
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-xml-signer.php';
     require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-queue-processor.php';
 
     // Load exoneración (tax exemption) class
@@ -167,20 +140,29 @@ function fe_woo_init() {
     // Load PDF generator class
     require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-pdf-generator.php';
 
-    // Load mensaje receptor generator class
-    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-mensaje-receptor.php';
+    // Load Product CABYS class (per-product CABYS classification)
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-product-cabys.php';
 
-    // Load Tax CABYS integration class
-    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-tax-cabys.php';
+    // Load Product TipoTransaccion (per-product XSD v4.4 TipoTransaccion override)
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-product-tipo-transaccion.php';
 
-    // Load CABYS watcher class (monitors product updates to reset pending invoices)
-    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-cabys-watcher.php';
+    // Load Product UnidadMedidaComercial (per-product XSD v4.4 unit override, dropdown en Shipping tab)
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-product-unidad-medida.php';
+
+    // Load CR Locations catalog (Provincia / Cantón / Distrito + AJAX endpoints)
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-cr-locations.php';
+
+    // Tax rate → CodigoTarifaIVA mapper (column extension on WC tax rates UI).
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-tax-codigo-mapper.php';
 
     // Load Nota (Credit/Debit Note) Manager class
     require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-nota-manager.php';
 
     // Load Proforma management class
     require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-proforma.php';
+
+    // Load Email Manager class (registers all WC_Email subclasses)
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-email-manager.php';
 
     // Initialize certificate handler
     FE_Woo_Certificate_Handler::init();
@@ -210,17 +192,29 @@ function fe_woo_init() {
     // Initialize document storage
     FE_Woo_Document_Storage::init();
 
-    // Initialize Tax CABYS integration
-    FE_Woo_Tax_CABYS::init();
+    // Initialize Product CABYS (per-product CABYS field in product editor)
+    FE_Woo_Product_CABYS::init();
 
-    // Initialize CABYS watcher (automatic pending invoice reset on product updates)
-    FE_Woo_CABYS_Watcher::init();
+    // Initialize Product TipoTransaccion (per-product XSD v4.4 TipoTransaccion field)
+    FE_Woo_Product_Tipo_Transaccion::init();
+
+    // Initialize Product UnidadMedidaComercial (Shipping tab dropdown, virtual default 'Unid')
+    FE_Woo_Product_Unidad_Medida::init();
+
+    // Initialize CR Locations (registers AJAX endpoints for cascade dropdowns)
+    FE_Woo_CR_Locations::init();
+
+    // Initialize Tax Codigo Mapper (column extension + AJAX + cleanup hook)
+    FE_Woo_Tax_Codigo_Mapper::init();
 
     // Initialize Nota (Credit/Debit Note) Manager
     FE_Woo_Nota_Manager::init();
 
     // Initialize Proforma management
     FE_Woo_Proforma::init();
+
+    // Initialize Email Manager (registers all email classes and templates)
+    FE_Woo_Email_Manager::init();
 
     // Initialize Product Emisor
     FE_Woo_Product_Emisor::init();
@@ -246,6 +240,10 @@ function fe_woo_check_version() {
         // Create emisores table
         require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-emisor-manager.php';
         FE_Woo_Emisor_Manager::create_table();
+
+        // Create tax rate → CodigoTarifaIVA mapping table
+        require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-tax-codigo-mapper.php';
+        FE_Woo_Tax_Codigo_Mapper::create_table();
 
         // Ensure additional columns exist in queue table (dbDelta may not add them reliably)
         $table_name = $wpdb->prefix . 'fe_woo_factura_queue';

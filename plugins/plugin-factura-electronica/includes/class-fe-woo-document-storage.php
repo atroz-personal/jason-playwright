@@ -194,6 +194,45 @@ class FE_Woo_Document_Storage {
     }
 
     /**
+     * Save the signed MensajeHacienda XML that Hacienda returns inside the
+     * `respuesta-xml` field of its JSON acuse. File is named AHC-{clave}.xml
+     * to match the convention Hacienda itself uses in production downloads.
+     *
+     * @param int    $order_id Order ID
+     * @param string $xml_content Decoded MensajeHacienda XML
+     * @param string $clave Document clave (50 digits)
+     * @return array Result with 'success' and 'file_path' or 'error'
+     */
+    public static function save_acuse_xml($order_id, $xml_content, $clave) {
+        $order_dir = self::get_order_dir($order_id);
+
+        if (!self::ensure_directory_exists($order_dir)) {
+            return [
+                'success' => false,
+                'error' => __('Failed to create order directory', 'fe-woo'),
+            ];
+        }
+
+        $filename = 'AHC-' . sanitize_file_name($clave) . '.xml';
+        $file_path = trailingslashit($order_dir) . $filename;
+
+        $result = file_put_contents($file_path, $xml_content);
+
+        if ($result === false) {
+            return [
+                'success' => false,
+                'error' => __('Failed to write acuse XML file', 'fe-woo'),
+            ];
+        }
+
+        return [
+            'success' => true,
+            'file_path' => $file_path,
+            'filename' => $filename,
+        ];
+    }
+
+    /**
      * Get XML file path for an order
      *
      * @param int    $order_id Order ID
@@ -218,6 +257,21 @@ class FE_Woo_Document_Storage {
     public static function get_acuse_path($order_id, $clave) {
         $order_dir = self::get_order_dir($order_id);
         $filename = sanitize_file_name($clave) . '_acuse.json';
+        $file_path = trailingslashit($order_dir) . $filename;
+
+        return file_exists($file_path) ? $file_path : null;
+    }
+
+    /**
+     * Get the signed MensajeHacienda XML path (AHC-{clave}.xml), if present.
+     *
+     * @param int    $order_id Order ID
+     * @param string $clave Document clave
+     * @return string|null File path or null if not found
+     */
+    public static function get_acuse_xml_path($order_id, $clave) {
+        $order_dir = self::get_order_dir($order_id);
+        $filename = 'AHC-' . sanitize_file_name($clave) . '.xml';
         $file_path = trailingslashit($order_dir) . $filename;
 
         return file_exists($file_path) ? $file_path : null;
@@ -293,99 +347,20 @@ class FE_Woo_Document_Storage {
     }
 
     /**
-     * Save Mensaje Receptor XML for an order
-     *
-     * @param int    $order_id Order ID
-     * @param string $xml_content XML content
-     * @param string $clave Document clave (mensaje receptor clave)
-     * @return array Result with 'success' and 'file_path' or 'error'
-     */
-    public static function save_mensaje_receptor($order_id, $xml_content, $clave) {
-        $order_dir = self::get_order_dir($order_id);
-
-        if (!self::ensure_directory_exists($order_dir)) {
-            return [
-                'success' => false,
-                'error' => __('Failed to create order directory', 'fe-woo'),
-            ];
-        }
-
-        $filename = sanitize_file_name($clave) . '_mensaje_receptor.xml';
-        $file_path = trailingslashit($order_dir) . $filename;
-
-        $result = file_put_contents($file_path, $xml_content);
-
-        if ($result === false) {
-            return [
-                'success' => false,
-                'error' => __('Failed to write mensaje receptor XML file', 'fe-woo'),
-            ];
-        }
-
-        return [
-            'success' => true,
-            'file_path' => $file_path,
-            'filename' => $filename,
-        ];
-    }
-
-    /**
-     * Get Mensaje Receptor XML file path for an order
-     *
-     * @param int    $order_id Order ID
-     * @param string $clave Mensaje receptor clave
-     * @return string|null File path or null if not found
-     */
-    public static function get_mensaje_receptor_path($order_id, $clave) {
-        $order_dir = self::get_order_dir($order_id);
-        $filename = sanitize_file_name($clave) . '_mensaje_receptor.xml';
-        $file_path = trailingslashit($order_dir) . $filename;
-
-        return file_exists($file_path) ? $file_path : null;
-    }
-
-    /**
      * Get all document paths for an order
      *
      * @param int    $order_id Order ID
      * @param string $clave Document clave
-     * @return array Array with 'xml', 'acuse', 'pdf', and 'mensaje_receptor' file paths
+     * @return array Array with 'xml' (signed factura), 'acuse' (response JSON),
+     *               'acuse_xml' (signed MensajeHacienda), and 'pdf' paths.
      */
     public static function get_document_paths($order_id, $clave) {
-        $paths = [
+        return [
             'xml' => self::get_xml_path($order_id, $clave),
             'acuse' => self::get_acuse_path($order_id, $clave),
+            'acuse_xml' => self::get_acuse_xml_path($order_id, $clave),
             'pdf' => self::get_pdf_path($order_id, $clave),
         ];
-
-        // Try to get mensaje receptor - use WooCommerce meta methods
-        $order = wc_get_order($order_id);
-        if ($order) {
-            $mensaje_receptor_clave = $order->get_meta('_fe_woo_mensaje_receptor_clave');
-
-            // Debug logging
-            if (function_exists('wc_get_logger')) {
-                $logger = wc_get_logger();
-                $logger->debug(sprintf('Getting document paths for order #%d', $order_id), ['source' => 'fe-woo-document-storage']);
-                $logger->debug(sprintf('  - Mensaje Receptor Clave from meta: %s', $mensaje_receptor_clave ?: 'EMPTY'), ['source' => 'fe-woo-document-storage']);
-            }
-
-            if ($mensaje_receptor_clave) {
-                $mensaje_receptor_path = self::get_mensaje_receptor_path($order_id, $mensaje_receptor_clave);
-                $paths['mensaje_receptor'] = $mensaje_receptor_path;
-
-                // Debug logging
-                if (function_exists('wc_get_logger')) {
-                    $logger = wc_get_logger();
-                    $logger->debug(sprintf('  - Mensaje Receptor Path: %s', $mensaje_receptor_path ?: 'NULL'), ['source' => 'fe-woo-document-storage']);
-                    if ($mensaje_receptor_path) {
-                        $logger->debug(sprintf('  - File exists: %s', file_exists($mensaje_receptor_path) ? 'YES' : 'NO'), ['source' => 'fe-woo-document-storage']);
-                    }
-                }
-            }
-        }
-
-        return $paths;
     }
 
     /**
@@ -446,16 +421,11 @@ class FE_Woo_Document_Storage {
         }
 
         // Get file path
-        if ($type === 'mensaje_receptor') {
-            // For mensaje_receptor, clave is the mensaje_receptor_clave
-            $file_path = self::get_mensaje_receptor_path($order_id, $clave);
-        } else {
-            $paths = self::get_document_paths($order_id, $clave);
-            if (!isset($paths[$type]) || $paths[$type] === null) {
-                wp_die(__('Document not found.', 'fe-woo'), 404);
-            }
-            $file_path = $paths[$type];
+        $paths = self::get_document_paths($order_id, $clave);
+        if (!isset($paths[$type]) || $paths[$type] === null) {
+            wp_die(__('Document not found.', 'fe-woo'), 404);
         }
+        $file_path = $paths[$type];
 
         if (!$file_path) {
             wp_die(__('Document not found.', 'fe-woo'), 404);

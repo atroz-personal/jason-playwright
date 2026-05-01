@@ -25,6 +25,33 @@ class FE_Woo_Queue_Processor {
     const CRON_HOOK = 'fe_woo_process_queue';
 
     /**
+     * Cron hook para el health check (T-4 v1.19.0): detectar y resetear items
+     * varados en "processing" + notificar al admin si hay items failed-permanentes.
+     */
+    const HEALTH_CHECK_HOOK = 'fe_woo_queue_health_check';
+
+    /**
+     * Hook used to poll Hacienda for the signed MensajeHacienda XML when the
+     * initial POST /recepcion response didn't include `respuesta-xml`. One
+     * single-shot event is scheduled per (order_id, clave) on the queue path;
+     * handler reschedules itself with backoff until it gets the XML or gives up.
+     */
+    const POLL_ACUSE_HOOK = 'fe_woo_poll_acuse_xml';
+
+    const POLL_MAX_ATTEMPTS = 8;
+
+    /**
+     * Hook para envío async de email multi-factura.
+     *
+     * Antes (≤ v1.13.0): process_multi_factura llamaba send_multi_factura_email
+     * inline al final del procesamiento. Cada email tarda 2-4 min por SMTP, y
+     * para 2 emisores el tick gastaba 4-8 min bloqueando el resto del queue.
+     * Ahora process_multi_factura agenda este hook a +5s; el tick termina
+     * rápido y los emails se envían en su propio cron event.
+     */
+    const MULTI_FACTURA_EMAIL_HOOK = 'fe_woo_send_multi_factura_email';
+
+    /**
      * Initialize the processor
      */
     public static function init() {
@@ -33,8 +60,365 @@ class FE_Woo_Queue_Processor {
             wp_schedule_event(time(), 'hourly', self::CRON_HOOK);
         }
 
+        // Health check cron — corre cada hora con offset de 30min relativo al
+        // process_queue para no pisar la misma ventana de ejecución.
+        if (!wp_next_scheduled(self::HEALTH_CHECK_HOOK)) {
+            wp_schedule_event(time() + 1800, 'hourly', self::HEALTH_CHECK_HOOK);
+        }
+
         // Hook into cron
         add_action(self::CRON_HOOK, [__CLASS__, 'process_queue']);
+        add_action(self::HEALTH_CHECK_HOOK, [FE_Woo_Queue::class, 'health_check']);
+
+        // Single-event polling for the signed MensajeHacienda acuse XML.
+        add_action(self::POLL_ACUSE_HOOK, [__CLASS__, 'poll_acuse_xml'], 10, 3);
+
+        // Async sender para emails multi-factura (v1.14.0 — fix B-5).
+        add_action(self::MULTI_FACTURA_EMAIL_HOOK, [__CLASS__, 'send_multi_factura_email_async'], 10, 1);
+    }
+
+    /**
+     * Decode Hacienda's `respuesta-xml` (base64) from an API response envelope
+     * and persist it as AHC-{clave}.xml. Returns true when the XML was written.
+     *
+     * The response shape this understands is the one returned by
+     * FE_Woo_API_Client::send_invoice / query_invoice_status — a wrapper with
+     * `data` holding Hacienda's raw JSON. We also accept the raw JSON directly
+     * (used by the backfill CLI).
+     *
+     * @param int    $order_id
+     * @param string $clave
+     * @param array  $response API response (either wrapped or raw Hacienda payload)
+     * @return bool True if acuse XML was extracted and saved.
+     */
+    public static function save_acuse_xml_from_response($order_id, $clave, $response) {
+        if (!is_array($response)) {
+            return false;
+        }
+
+        // Unwrap: responses from our client put Hacienda's body under `data`.
+        $payload = isset($response['data']) && is_array($response['data']) ? $response['data'] : $response;
+
+        // Hacienda's field is `respuesta-xml`. Some internal paths may use the
+        // PHP-safe alias `respuesta_xml`; accept both so the backfill helper
+        // doesn't need to rename keys.
+        $b64 = null;
+        if (!empty($payload['respuesta-xml'])) {
+            $b64 = $payload['respuesta-xml'];
+        } elseif (!empty($payload['respuesta_xml'])) {
+            $b64 = $payload['respuesta_xml'];
+        }
+
+        if (empty($b64) || !is_string($b64)) {
+            return false;
+        }
+
+        $xml = base64_decode($b64, true);
+        if ($xml === false || strpos($xml, '<MensajeHacienda') === false) {
+            // Treat as absent; don't persist garbage. Hacienda is expected to
+            // send a well-formed MensajeHacienda once the doc reaches a final
+            // state — anything else is likely a partial/error payload.
+            return false;
+        }
+
+        $result = FE_Woo_Document_Storage::save_acuse_xml($order_id, $xml, $clave);
+        if (!$result['success']) {
+            self::log(sprintf('Failed to save acuse XML for order #%d: %s', $order_id, $result['error']), 'error');
+            return false;
+        }
+
+        // Also pull `ind-estado` off the same payload so the order UI reflects
+        // the final Hacienda state (aceptado/rechazado) instead of staying
+        // frozen at "procesando" from the initial POST response.
+        $ind_estado = null;
+        if (!empty($payload['ind-estado'])) {
+            $ind_estado = strtolower((string) $payload['ind-estado']);
+        }
+
+        // Extract the human-readable detail from the MensajeHacienda XML so
+        // we can surface it in the order admin (Hacienda's rejection reasons
+        // live in DetalleMensaje, not the outer JSON).
+        $hacienda_detail = self::extract_acuse_detail($xml);
+
+        $order = wc_get_order($order_id);
+        $previous_status = $order ? (string) $order->get_meta('_fe_woo_hacienda_status') : '';
+
+        // Decide the canonical status. The signed MensajeHacienda
+        // (EstadoMensaje inside the AHC XML) is Hacienda's authoritative
+        // verdict — the JSON wrapper's `ind-estado` can lag behind on
+        // the first call after processing completes. Prefer EstadoMensaje
+        // when it resolves to a terminal state; fall back to ind-estado
+        // otherwise.
+        $effective_status = null;
+        $xml_estado = !empty($hacienda_detail['estado_mensaje']) ? strtolower($hacienda_detail['estado_mensaje']) : '';
+        if (in_array($xml_estado, ['aceptado', 'rechazado'], true)) {
+            $effective_status = $xml_estado;
+        } elseif ($ind_estado && in_array($ind_estado, ['aceptado', 'rechazado', 'procesando', 'recibido'], true)) {
+            $effective_status = $ind_estado;
+        } elseif (in_array($xml_estado, ['procesando', 'recibido'], true)) {
+            $effective_status = $xml_estado;
+        }
+
+        if ($order) {
+            $order->update_meta_data('_fe_woo_acuse_xml_file_path', $result['file_path']);
+            if ($effective_status) {
+                $order->update_meta_data('_fe_woo_hacienda_status', $effective_status);
+                $order->update_meta_data('_fe_woo_last_status_check', current_time('mysql'));
+            }
+            if (!empty($hacienda_detail['detalle'])) {
+                $order->update_meta_data('_fe_woo_hacienda_detalle', $hacienda_detail['detalle']);
+            }
+            if (!empty($hacienda_detail['estado_mensaje'])) {
+                $order->update_meta_data('_fe_woo_hacienda_estado_mensaje', $hacienda_detail['estado_mensaje']);
+            }
+            $order->save();
+
+            // Document label for notes/email (factura/tiquete/nota).
+            $doc_type  = $order->get_meta('_fe_woo_document_type') ?: 'tiquete';
+            $doc_label = ($doc_type === 'factura') ? 'Factura Electrónica' : 'Tiquete Electrónico';
+
+            // Notas y email se disparan exactamente una vez por transición
+            // a estado terminal. El gate previous_status !== effective_status
+            // previene duplicados cuando el cron + el polling JS + el botón
+            // de re-consulta apuntan al mismo veredicto.
+            if ($effective_status === 'aceptado' && $previous_status !== 'aceptado') {
+                $order->add_order_note(sprintf(
+                    /* translators: 1: tipo de documento (Factura/Tiquete/Nota), 2: clave numérica de Hacienda */
+                    __('%1$s aceptada por Hacienda. Clave: %2$s', 'fe-woo'),
+                    $doc_label,
+                    $clave
+                ));
+                try {
+                    self::send_factura_email($order, $clave, $doc_type);
+                } catch (Exception $e) {
+                    self::log(sprintf('Email send failed for order #%d: %s', $order_id, $e->getMessage()), 'error');
+                }
+            } elseif ($effective_status === 'rechazado' && $previous_status !== 'rechazado') {
+                $detalle_corto = !empty($hacienda_detail['detalle'])
+                    ? mb_substr((string) $hacienda_detail['detalle'], 0, 500)
+                    : '';
+                $order->add_order_note(sprintf(
+                    /* translators: 1: tipo de documento, 2: clave, 3: motivo de rechazo (truncado) */
+                    __('%1$s rechazada por Hacienda. Clave: %2$s. Motivo: %3$s', 'fe-woo'),
+                    $doc_label,
+                    $clave,
+                    $detalle_corto ?: __('(sin detalle)', 'fe-woo')
+                ));
+            }
+        }
+
+        self::log(sprintf('Acuse XML saved for order #%d at %s (estado=%s)', $order_id, $result['file_path'], $effective_status ?: 'n/a'));
+        return true;
+    }
+
+    /**
+     * Pull EstadoMensaje + DetalleMensaje out of a signed MensajeHacienda
+     * XML string. Returns empty strings if parsing fails — callers should
+     * treat missing fields as "unknown" rather than letting the whole
+     * acuse pipeline fail over a parse error.
+     *
+     * @param string $xml Raw MensajeHacienda XML (base64-decoded).
+     * @return array{detalle:string,estado_mensaje:string}
+     */
+    private static function extract_acuse_detail($xml) {
+        $out = ['detalle' => '', 'estado_mensaje' => ''];
+        $doc = new DOMDocument();
+        // Squelch warnings — we'd rather fall back silently than surface
+        // a libxml notice in the queue logs.
+        if (!@$doc->loadXML($xml, LIBXML_NONET)) {
+            return $out;
+        }
+        $xp = new DOMXPath($doc);
+        $xp->registerNamespace('mh', 'https://cdn.comprobanteselectronicos.go.cr/xml-schemas/v4.4/mensajeHacienda');
+        $estado = $xp->query('//mh:EstadoMensaje')->item(0);
+        $detalle = $xp->query('//mh:DetalleMensaje')->item(0);
+        if ($estado)  { $out['estado_mensaje'] = trim($estado->textContent); }
+        if ($detalle) { $out['detalle']        = trim($detalle->textContent); }
+        return $out;
+    }
+
+    /**
+     * Query Hacienda for the current ind-estado and update the order meta.
+     * Used when the AHC- XML is already on disk but the order status on our
+     * side never got refreshed from "procesando". Also re-populates the
+     * EstadoMensaje/DetalleMensaje meta from the on-disk AHC when the
+     * consulta endpoint only returns ind-estado without `respuesta-xml`.
+     */
+    private static function refresh_hacienda_status_from_api($order, $clave) {
+        $dirty = false;
+
+        // First: always refresh the EstadoMensaje/DetalleMensaje meta from
+        // the on-disk AHC if we have it. The MensajeHacienda XML is the
+        // authoritative source for the rejection reason, and it doesn't
+        // need a network call. (Hacienda's consulta endpoint also returns
+        // the XML, but only on the first response after processing
+        // completes — subsequent calls often omit `respuesta-xml`.)
+        $ahc_path = FE_Woo_Document_Storage::get_acuse_xml_path($order->get_id(), $clave);
+        if ($ahc_path && file_exists($ahc_path)) {
+            $detail = self::extract_acuse_detail(file_get_contents($ahc_path));
+            if (!empty($detail['detalle'])) {
+                $order->update_meta_data('_fe_woo_hacienda_detalle', $detail['detalle']);
+                $dirty = true;
+            }
+            if (!empty($detail['estado_mensaje'])) {
+                $order->update_meta_data('_fe_woo_hacienda_estado_mensaje', $detail['estado_mensaje']);
+                // Also map EstadoMensaje → ind-estado if the order's local
+                // status is still stuck on something pre-final. Mapping is
+                // straightforward: "Aceptado"/"Rechazado"/"Procesando".
+                $mapped = strtolower($detail['estado_mensaje']);
+                if (in_array($mapped, ['aceptado', 'rechazado', 'procesando', 'recibido'], true)) {
+                    $current = strtolower((string) $order->get_meta('_fe_woo_hacienda_status'));
+                    if ($current !== $mapped) {
+                        $order->update_meta_data('_fe_woo_hacienda_status', $mapped);
+                    }
+                }
+                $dirty = true;
+            }
+        }
+
+        // Second: hit the consulta endpoint for the latest ind-estado. If
+        // the token is stale or the call fails we still have whatever we
+        // pulled from the on-disk AHC above.
+        try {
+            $client = new FE_Woo_API_Client();
+            $result = $client->query_invoice_status($clave);
+            $payload = isset($result['data']) && is_array($result['data']) ? $result['data'] : null;
+            if ($payload && !empty($payload['ind-estado'])) {
+                $estado = strtolower((string) $payload['ind-estado']);
+                if (in_array($estado, ['aceptado', 'rechazado', 'procesando', 'recibido'], true)) {
+                    $order->update_meta_data('_fe_woo_hacienda_status', $estado);
+                    $order->update_meta_data('_fe_woo_last_status_check', current_time('mysql'));
+                    $dirty = true;
+                }
+            }
+        } catch (Exception $e) {
+            // Ignore — the on-disk AHC meta still got written above.
+        }
+
+        if ($dirty) {
+            $order->save();
+        }
+    }
+
+    /**
+     * Poll Hacienda's consulta endpoint for the signed MensajeHacienda XML.
+     * Scheduled as a single event; reschedules itself with exponential backoff
+     * (1m, 2m, 5m, 10m, 20m, 40m, 1h, 2h) up to POLL_MAX_ATTEMPTS, or gives up
+     * silently if the consulta endpoint rejects auth (403) since that indicates
+     * a configuration gap, not a transient failure.
+     *
+     * @param int    $order_id
+     * @param string $clave
+     * @param int    $attempt 1-based
+     */
+    /**
+     * @deprecated 1.10.0 Bloqueaba la request HTTP del admin hasta 96s
+     * (sleep [1,2,3] + 3 timeouts de 30s) y causaba 504 en Pantheon
+     * (límite 60s). El polling del acuse se delegó al frontend (browser
+     * hace polling vía recheck_status) y al cron `poll_acuse_xml` como
+     * red de seguridad. La función se conserva por compatibilidad con
+     * extensiones que pudieran llamarla, pero el flujo normal ya no la
+     * invoca. Para correr una consulta única y rápida, usar
+     * `query_invoice_status` directamente desde el cliente API.
+     */
+    public static function poll_acuse_xml_inline($order_id, $clave) {
+        // Max 3 attempts so the inline wait stays bounded and the UI
+        // request doesn't drag on. Total worst case = 1 + 2 + 3 = 6 s,
+        // which fits comfortably under the AJAX 120s budget and avoids
+        // any risk of runaway loops. Slower responses are picked up by
+        // the scheduled backoff poll below.
+        $delays = [1, 2, 3];
+
+        foreach ($delays as $i => $seconds) {
+            sleep($seconds);
+
+            try {
+                $client = new FE_Woo_API_Client();
+                $result = $client->query_invoice_status($clave);
+            } catch (Exception $e) {
+                continue;
+            }
+
+            $payload = isset($result['data']) && is_array($result['data']) ? $result['data'] : null;
+            $estado = $payload && !empty($payload['ind-estado']) ? strtolower((string) $payload['ind-estado']) : '';
+
+            // Persist whatever came back (ind-estado + possibly respuesta-xml).
+            // save_acuse_xml_from_response handles the AHC + meta writes.
+            self::save_acuse_xml_from_response($order_id, $clave, $result);
+
+            // If we have the signed XML OR Hacienda reached a terminal state,
+            // we're done polling inline — the admin page can render the final
+            // state immediately.
+            if (FE_Woo_Document_Storage::get_acuse_xml_path($order_id, $clave)
+                || in_array($estado, ['aceptado', 'rechazado'], true)) {
+                return;
+            }
+        }
+
+        // Still not final after ~12 s — hand off to the cron-backed backoff
+        // poll so the UI catches up whenever Hacienda finishes processing.
+        wp_schedule_single_event(time() + 60, self::POLL_ACUSE_HOOK, [$order_id, $clave, 1]);
+    }
+
+    public static function poll_acuse_xml($order_id, $clave, $attempt = 1) {
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return;
+        }
+
+        // If the XML is already on disk we can skip the GET, but we still
+        // need to make sure the order's Hacienda status reflects the final
+        // state and the EstadoMensaje/DetalleMensaje meta fields are
+        // populated. The refresh call handles both.
+        if (FE_Woo_Document_Storage::get_acuse_xml_path($order_id, $clave)) {
+            $current = strtolower((string) $order->get_meta('_fe_woo_hacienda_status'));
+            $has_detail = $order->get_meta('_fe_woo_hacienda_detalle') !== '';
+            if (!$has_detail || in_array($current, ['', 'procesando', 'recibido'], true)) {
+                self::refresh_hacienda_status_from_api($order, $clave);
+            }
+            return;
+        }
+
+        try {
+            $client = new FE_Woo_API_Client();
+            $result = $client->query_invoice_status($clave);
+        } catch (Exception $e) {
+            self::log(sprintf('poll_acuse_xml: query failed for order #%d: %s', $order_id, $e->getMessage()), 'error');
+            $result = ['success' => false];
+        }
+
+        // Intentar guardar el AHC primero. Si respuesta-xml viene en la
+        // misma respuesta, esto escribe el archivo, resuelve el status
+        // terminal y agrega la nota terminal — todo con previous_status
+        // correcto leído desde DB pre-actualización. Si lo hacemos al
+        // revés (intermediate update primero), save_acuse_xml_from_response
+        // ve previous_status='aceptado' y silencia la nota + el email.
+        $saved = self::save_acuse_xml_from_response($order_id, $clave, $result);
+        if ($saved) {
+            return;
+        }
+
+        // AHC todavía no disponible. Surface el ind-estado intermedio
+        // ("recibido"/"procesando") que Hacienda haya dado para que el
+        // panel admin no se vea estancado.
+        $payload = isset($result['data']) && is_array($result['data']) ? $result['data'] : null;
+        if ($payload && !empty($payload['ind-estado'])) {
+            $estado = strtolower((string) $payload['ind-estado']);
+            if (in_array($estado, ['aceptado', 'rechazado', 'procesando', 'recibido'], true)) {
+                $order->update_meta_data('_fe_woo_hacienda_status', $estado);
+                $order->update_meta_data('_fe_woo_last_status_check', current_time('mysql'));
+                $order->save();
+            }
+        }
+
+        if ($attempt >= self::POLL_MAX_ATTEMPTS) {
+            self::log(sprintf('poll_acuse_xml: giving up on order #%d after %d attempts', $order_id, $attempt));
+            return;
+        }
+
+        $backoff = [60, 120, 300, 600, 1200, 2400, 3600, 7200];
+        $delay = $backoff[$attempt - 1] ?? 3600;
+        wp_schedule_single_event(time() + $delay, self::POLL_ACUSE_HOOK, [$order_id, $clave, $attempt + 1]);
     }
 
     /**
@@ -63,6 +447,15 @@ class FE_Woo_Queue_Processor {
         set_transient('fe_woo_queue_processing', true, 300); // 5 minute lock
 
         try {
+            // Recover items varados en `processing` de cron ticks anteriores
+            // que fueron interrumpidos (timeout, redeploy, fatal). Sin esto
+            // el item queda bloqueado indefinidamente — el transient lock
+            // expira a 5 min pero el row no se libera solo.
+            $recovered = FE_Woo_Queue::recover_stale_processing_items(10);
+            if ($recovered > 0) {
+                self::log(sprintf('Recovered %d stale processing items to retry', $recovered));
+            }
+
             // Get pending items
             $items = FE_Woo_Queue::get_pending_items(10); // Process 10 at a time
 
@@ -294,6 +687,8 @@ class FE_Woo_Queue_Processor {
             $clave = $result['clave'];
             $xml = $result['xml'];
 
+            $xml = self::sign_and_validate($xml, $emisor, $order->get_id(), $clave);
+
             // Send to Hacienda using emisor's specific credentials
             $api_client = new FE_Woo_API_Client();
             $response = $api_client->send_invoice_with_emisor($xml, $emisor);
@@ -307,8 +702,10 @@ class FE_Woo_Queue_Processor {
                 throw new Exception($error_message);
             }
 
-            // Mark as completed
-            FE_Woo_Queue::mark_completed($item->id, $clave, $xml, $response);
+            // Do NOT mark as completed yet. The queue item stays in
+            // "processing" until we know Hacienda's final verdict — only
+            // aceptado is considered success. Rejected / procesando /
+            // recibido all get their own handling further down.
 
             // Save documents to filesystem
             $xml_result = FE_Woo_Document_Storage::save_xml($item->order_id, $xml, $clave);
@@ -322,32 +719,17 @@ class FE_Woo_Queue_Processor {
                 $order->update_meta_data('_fe_woo_acuse_file_path', $acuse_result['file_path']);
             }
 
-            // Generate Mensaje Receptor XML (acceptance message to Hacienda)
-            $mensaje_result = FE_Woo_Mensaje_Receptor::generate_mensaje_receptor($order, $clave, $response, $document_type);
-            if ($mensaje_result['success']) {
-                self::log(sprintf('Mensaje Receptor generated successfully for order #%d. Clave: %s', $item->order_id, $mensaje_result['clave']));
-
-                $mensaje_save_result = FE_Woo_Document_Storage::save_mensaje_receptor(
-                    $item->order_id,
-                    $mensaje_result['xml'],
-                    $mensaje_result['clave']
-                );
-
-                if ($mensaje_save_result['success']) {
-                    $order->update_meta_data('_fe_woo_mensaje_receptor_clave', $mensaje_result['clave']);
-                    $order->update_meta_data('_fe_woo_mensaje_receptor_xml', $mensaje_result['xml']);
-                    $order->update_meta_data('_fe_woo_mensaje_receptor_file_path', $mensaje_save_result['file_path']);
-                    $order->save();
-
-                    self::log(sprintf('Mensaje Receptor saved successfully for order #%d', $item->order_id));
-                    self::log(sprintf('  - File path: %s', $mensaje_save_result['file_path']));
-                    self::log(sprintf('  - File exists: %s', file_exists($mensaje_save_result['file_path']) ? 'YES' : 'NO'));
-                    self::log(sprintf('  - Meta saved - Clave: %s', $order->get_meta('_fe_woo_mensaje_receptor_clave')));
-                } else {
-                    self::log(sprintf('Failed to save Mensaje Receptor for order #%d: %s', $item->order_id, $mensaje_save_result['error']), 'error');
+            // Persist el MensajeHacienda firmado. La respuesta del envío a
+            // veces ya trae el acuse firmado (best-effort). Si no, agendamos
+            // el cron de polling con backoff en lugar de bloquear el worker
+            // del queue. Esto libera el lock del transient antes y permite
+            // que el cron tick procese más items por hora sin riesgo de
+            // consumir 96s+ por orden.
+            self::save_acuse_xml_from_response($item->order_id, $clave, $response);
+            if (!FE_Woo_Document_Storage::get_acuse_xml_path($item->order_id, $clave)) {
+                if (!wp_next_scheduled(self::POLL_ACUSE_HOOK, [$item->order_id, $clave, 1])) {
+                    wp_schedule_single_event(time() + 30, self::POLL_ACUSE_HOOK, [$item->order_id, $clave, 1]);
                 }
-            } else {
-                self::log(sprintf('Failed to generate Mensaje Receptor for order #%d: %s', $item->order_id, $mensaje_result['error']), 'error');
             }
 
             // Generate and save PDF (exonerations only apply to parent/default emisor)
@@ -368,29 +750,76 @@ class FE_Woo_Queue_Processor {
                 self::log(sprintf('Failed to generate PDF for order #%d: %s', $item->order_id, $pdf_result['error']), 'error');
             }
 
-            // Update order meta
+            // Update order meta. save_acuse_xml_from_response (llamado arriba)
+            // puede haber resuelto _fe_woo_hacienda_status en una $order fresca
+            // de DB cuando respuesta-xml llegó en la misma respuesta del envío.
+            // No debemos leer el meta de la copia in-memory estale — sobreescribiríamos
+            // "aceptado"/"rechazado" con "procesando". Reload desde DB antes de chequear.
             $order->update_meta_data('_fe_woo_document_type', $document_type);
             $order->update_meta_data('_fe_woo_factura_clave', $clave);
             $order->update_meta_data('_fe_woo_factura_xml', $xml);
             $order->update_meta_data('_fe_woo_factura_status', 'sent');
             $order->update_meta_data('_fe_woo_factura_sent_date', current_time('mysql'));
-            $order->update_meta_data('_fe_woo_hacienda_status', 'procesando'); // 202 = accepted for processing, actual status comes asynchronously
             $order->save();
 
-            // Add order note
+            // Now read fresh — this sees whatever the poll wrote.
+            $fresh = wc_get_order($item->order_id);
+            $existing_hacienda_status = (string) $fresh->get_meta('_fe_woo_hacienda_status');
+            if ($existing_hacienda_status === '') {
+                $fresh->update_meta_data('_fe_woo_hacienda_status', 'procesando');
+                $fresh->save();
+            }
+
+            // Order note reflecting Hacienda's actual verdict. Adding
+            // "enviado exitosamente" before we know the verdict misleads
+            // the operator when Hacienda ends up rejecting — the note
+            // history would say "success" right next to a red rejection.
+            // Nota del envío. Las notas de veredicto terminal (aceptada /
+            // rechazada con motivo) las agrega save_acuse_xml_from_response
+            // cuando llega el acuse, gateadas por previous_status para
+            // evitar duplicados entre cron, polling JS y re-consulta.
             $document_label = ($document_type === 'factura') ? 'Factura Electrónica' : 'Tiquete Electrónico';
-            $order->add_order_note(
-                sprintf(
-                    __('%s enviado exitosamente. Clave: %s', 'fe-woo'),
-                    $document_label,
-                    $clave
-                )
-            );
+            $order->add_order_note(sprintf(
+                __('%s enviada a Hacienda. Clave: %s', 'fe-woo'),
+                $document_label, $clave
+            ));
 
-            self::log(sprintf('Successfully processed order #%d (%s). Clave: %s', $item->order_id, $document_type, $clave));
+            self::log(sprintf('Successfully sent order #%d (%s) to Hacienda. Clave: %s', $item->order_id, $document_type, $clave));
 
-            // Send email to customer with document attachments
-            self::send_factura_email($order, $clave, $document_type);
+            // Email is sent from save_acuse_xml_from_response() once Hacienda
+            // confirms "aceptado". Sending here (before the poll resolves)
+            // would ship documents for invoices that may still be rejected.
+
+            // El envío fue exitoso (tenemos clave). El veredicto de Hacienda
+            // lo resuelve el cron poll_acuse_xml en background, no el queue.
+            // Marcamos el queue item como completed para evitar que el siguiente
+            // tick re-pickup el item (STATUS_RETRY entra en get_pending_items)
+            // y regenere con NUEVA clave, generando un documento duplicado en
+            // Hacienda.
+            //
+            // Único caso especial: si Hacienda devolvió rechazo en línea (la
+            // respuesta del envío ya incluyó respuesta-xml con
+            // EstadoMensaje='rechazado'), marcamos failed sin auto-retry —
+            // el operador debe corregir datos. Si Hacienda rechaza
+            // asincrónicamente vía el cron poll_acuse_xml, _fe_woo_hacienda_status
+            // queda 'rechazado' en la orden + nota terminal visible en el
+            // panel admin. El admin usa "Reintentar" para crear un nuevo
+            // queue item con nueva clave.
+            $order = wc_get_order($item->order_id);
+            $final_status = $order ? strtolower((string) $order->get_meta('_fe_woo_hacienda_status')) : '';
+
+            if ($final_status === 'rechazado') {
+                $detalle = $order ? (string) $order->get_meta('_fe_woo_hacienda_detalle') : '';
+                FE_Woo_Queue::mark_failed(
+                    $item->id,
+                    sprintf('Rechazado por Hacienda: %s', substr($detalle ?: 'sin detalle', 0, 500)),
+                    false // do NOT retry automatically
+                );
+            } else {
+                // aceptado / procesando / recibido / vacío → envío exitoso.
+                // Cerramos el queue item; el polling del acuse se resuelve aparte.
+                FE_Woo_Queue::mark_completed($item->id, $clave, $xml, $response);
+            }
 
         } catch (Exception $e) {
             // Mark as failed
@@ -418,87 +847,73 @@ class FE_Woo_Queue_Processor {
     /**
      * Send factura or tiquete email to customer
      *
+     * Uses WC_Factura_Email (extends WC_Email) for branded HTML emails
+     * with WooCommerce header/footer and order details.
+     *
      * @param WC_Order $order Order object
      * @param string   $clave Invoice clave
      * @param string   $document_type Document type (factura or tiquete)
      */
     private static function send_factura_email($order, $clave, $document_type = 'tiquete') {
-        // For tiquete, use billing email; for factura, use invoice email
-        if ($document_type === 'factura') {
-            $email = $order->get_meta('_fe_woo_invoice_email');
-            if (empty($email)) {
-                $email = $order->get_billing_email();
-            }
-        } else {
-            $email = $order->get_billing_email();
-        }
-
-        if (empty($email)) {
-            return;
-        }
-
         $document_label = ($document_type === 'factura') ? 'Factura Electrónica' : 'Tiquete Electrónico';
 
-        $subject = sprintf(
-            __('%s #%s - %s', 'fe-woo'),
-            $document_label,
-            $order->get_order_number(),
-            get_bloginfo('name')
-        );
-
-        $message = sprintf(
-            __("Estimado/a %s,\n\nAdjunto encontrará su %s.\n\nClave: %s\nNúmero de Orden: %s\n\nGracias por su compra.\n\n%s", 'fe-woo'),
-            $order->get_billing_first_name(),
-            $document_label,
-            $clave,
-            $order->get_order_number(),
-            get_bloginfo('name')
-        );
-
-        $headers = ['Content-Type: text/plain; charset=UTF-8'];
-
-        // Get document paths from storage
+        // Collect attachments
         $attachments = [];
         $document_paths = FE_Woo_Document_Storage::get_document_paths($order->get_id(), $clave);
 
-        self::log(sprintf('Preparing %s email for order #%d to %s', $document_label, $order->get_id(), $email));
-        self::log(sprintf('Document paths retrieved: PDF=%s, XML=%s, Mensaje Receptor=%s, Acuse=%s',
+        self::log(sprintf('Preparing %s email for order #%d', $document_label, $order->get_id()));
+        self::log(sprintf('Document paths retrieved: PDF=%s, XML=%s, Acuse=%s',
             isset($document_paths['pdf']) ? 'YES' : 'NO',
             isset($document_paths['xml']) ? 'YES' : 'NO',
-            isset($document_paths['mensaje_receptor']) ? 'YES' : 'NO',
             isset($document_paths['acuse']) ? 'YES' : 'NO'
         ));
 
         // Attach PDF file (most important for the customer)
-        if (isset($document_paths['pdf']) && $document_paths['pdf']) {
+        if (!empty($document_paths['pdf']) && file_exists($document_paths['pdf'])) {
             $attachments[] = $document_paths['pdf'];
-            self::log(sprintf('  - PDF: %s (exists: %s)', $document_paths['pdf'], file_exists($document_paths['pdf']) ? 'YES' : 'NO'));
+            self::log(sprintf('  - PDF: %s', $document_paths['pdf']));
         }
 
-        // Attach XML file (original document)
-        if (isset($document_paths['xml']) && $document_paths['xml']) {
+        // Attach XML file (original signed document). This is the only XML the
+        // recipient's email-to-invoice service (GTI, etc.) should parse.
+        if (!empty($document_paths['xml']) && file_exists($document_paths['xml'])) {
             $attachments[] = $document_paths['xml'];
-            self::log(sprintf('  - XML: %s (exists: %s)', $document_paths['xml'], file_exists($document_paths['xml']) ? 'YES' : 'NO'));
+            self::log(sprintf('  - XML: %s', $document_paths['xml']));
         }
 
-        // Attach Mensaje Receptor XML (acceptance message)
-        if (isset($document_paths['mensaje_receptor']) && $document_paths['mensaje_receptor']) {
-            $attachments[] = $document_paths['mensaje_receptor'];
-            self::log(sprintf('  - Mensaje Receptor: %s (exists: %s)', $document_paths['mensaje_receptor'], file_exists($document_paths['mensaje_receptor']) ? 'YES' : 'NO'));
+        // Also attach the Acuse de Hacienda (AHC) — the signed
+        // MensajeHacienda that Hacienda returns confirming acceptance.
+        // Recipients' email-to-invoice services typically want both the
+        // original signed factura and the government acknowledgement
+        // alongside the PDF.
+        if (!empty($document_paths['acuse_xml']) && file_exists($document_paths['acuse_xml'])) {
+            $attachments[] = $document_paths['acuse_xml'];
+            self::log(sprintf('  - AHC: %s', $document_paths['acuse_xml']));
         }
-
-        // Note: acuse.json is NOT sent to customer - it's only for internal reference
 
         self::log(sprintf('Total attachments prepared: %d', count($attachments)));
 
-        // Send email
-        $email_result = wp_mail($email, $subject, $message, $headers, $attachments);
+        // Send via WC_Factura_Email (branded HTML template)
+        $mailer = WC()->mailer();
+        $emails = $mailer->get_emails();
 
-        if ($email_result) {
-            self::log(sprintf('%s email sent successfully to %s for order #%d with %d attachments', $document_label, $email, $order->get_id(), count($attachments)));
-        } else {
-            self::log(sprintf('FAILED to send %s email to %s for order #%d', $document_label, $email, $order->get_id()), 'error');
+        if (!isset($emails['WC_Factura_Email'])) {
+            self::log(sprintf('WC_Factura_Email class not found — cannot send %s email for order #%d', $document_label, $order->get_id()), 'error');
+            return;
         }
+
+        // Determine recipient (factura uses invoice email, tiquete uses billing email)
+        $recipient = ($document_type === 'factura')
+            ? ($order->get_meta('_fe_woo_invoice_email') ?: $order->get_billing_email())
+            : $order->get_billing_email();
+
+        if (empty($recipient)) {
+            self::log(sprintf('No recipient email found for order #%d — skipping %s email', $order->get_id(), $document_label), 'error');
+            return;
+        }
+
+        $emails['WC_Factura_Email']->trigger($order->get_id(), $order, $clave, $document_type, $attachments);
+        self::log(sprintf('%s email triggered for %s on order #%d with %d attachments (delivery depends on mail server)', $document_label, $recipient, $order->get_id(), count($attachments)));
     }
 
     /**
@@ -513,8 +928,17 @@ class FE_Woo_Queue_Processor {
         // Delegate to shared helper; on failure it throws so process_item catches it
         $result = self::generate_and_send_multi_facturas($order, $document_type, $multi_factura_result, 'start');
 
-        // Mark queue item as completed
-        FE_Woo_Queue::mark_completed($item->id, implode(', ', $result['all_claves']), '', ['multi_factura' => true]);
+        // Mark queue item as completed.
+        // Fix B-4 (v1.14.0): la columna `clave` es varchar(50). Una clave
+        // individual ocupa 50 chars; concatenar 2+ claves con implode genera
+        // 100+ chars y el UPDATE falla silenciosamente (item queda en
+        // STATUS_PROCESSING, C-2 lo recupera, próximo tick re-genera = duplicación).
+        // Guardamos la primera clave en el campo `clave` y la lista completa
+        // en el JSON `data` para traceability.
+        FE_Woo_Queue::mark_completed($item->id, $result['first_clave'], '', [
+            'multi_factura' => true,
+            'all_claves'    => $result['all_claves'],
+        ]);
 
         // Update order meta
         self::save_multi_factura_order_meta($order, $document_type, $result);
@@ -529,8 +953,39 @@ class FE_Woo_Queue_Processor {
 
         self::log(sprintf('Successfully processed multi-factura for order #%d. Generated %d facturas.', $order->get_id(), count($result['facturas_generated'])));
 
-        // Send email
-        self::send_multi_factura_email($order, $result['facturas_generated'], $document_type);
+        // Email asíncrono (Fix B-5 v1.14.0) — evita bloquear el cron tick
+        // por 2-4 min/email. El meta _fe_woo_facturas_generated quedó
+        // persistido por save_multi_factura_order_meta arriba, así que el
+        // handler async puede leerlo cuando dispare.
+        if (!wp_next_scheduled(self::MULTI_FACTURA_EMAIL_HOOK, [$order->get_id()])) {
+            wp_schedule_single_event(time() + 5, self::MULTI_FACTURA_EMAIL_HOOK, [$order->get_id()]);
+        }
+    }
+
+    /**
+     * Async handler para envío de email multi-factura (Fix B-5 v1.14.0).
+     *
+     * Lee facturas_generated y document_type de la order meta y delega al
+     * sender existente. Llamado por wp_schedule_single_event agendado desde
+     * process_multi_factura.
+     *
+     * @param int $order_id
+     */
+    public static function send_multi_factura_email_async($order_id) {
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            self::log(sprintf('send_multi_factura_email_async: order #%d not found', $order_id), 'error');
+            return;
+        }
+
+        $facturas_generated = $order->get_meta('_fe_woo_facturas_generated');
+        if (empty($facturas_generated) || !is_array($facturas_generated)) {
+            self::log(sprintf('send_multi_factura_email_async: no facturas_generated meta for order #%d', $order_id), 'error');
+            return;
+        }
+
+        $document_type = $order->get_meta('_fe_woo_document_type') ?: 'tiquete';
+        self::send_multi_factura_email($order, $facturas_generated, $document_type);
     }
 
     /**
@@ -644,6 +1099,8 @@ class FE_Woo_Queue_Processor {
                     $first_clave = $clave;
                 }
 
+                $xml = self::sign_and_validate($xml, $emisor, $order->get_id(), $clave);
+
                 $response = $api_client->send_invoice_with_emisor($xml, $emisor);
 
                 if (!$response['success']) {
@@ -657,11 +1114,11 @@ class FE_Woo_Queue_Processor {
                 // Save documents
                 $xml_result = FE_Woo_Document_Storage::save_xml($order_id, $xml, $clave);
                 FE_Woo_Document_Storage::save_acuse($order_id, $response, $clave);
-
-                // Generate Mensaje Receptor
-                $mensaje_result = FE_Woo_Mensaje_Receptor::generate_mensaje_receptor($order, $clave, $response, $document_type);
-                if ($mensaje_result['success']) {
-                    FE_Woo_Document_Storage::save_mensaje_receptor($order_id, $mensaje_result['xml'], $mensaje_result['clave']);
+                self::save_acuse_xml_from_response($order_id, $clave, $response);
+                if (!FE_Woo_Document_Storage::get_acuse_xml_path($order_id, $clave)) {
+                    if (!wp_next_scheduled(self::POLL_ACUSE_HOOK, [$order_id, $clave, 1])) {
+                        wp_schedule_single_event(time() + 30, self::POLL_ACUSE_HOOK, [$order_id, $clave, 1]);
+                    }
                 }
 
                 // Generate PDF (exonerations only apply to parent/default emisor)
@@ -751,84 +1208,52 @@ class FE_Woo_Queue_Processor {
         $order->update_meta_data('_fe_woo_factura_clave', $result['first_clave']);
         $order->update_meta_data('_fe_woo_factura_status', 'sent');
         $order->update_meta_data('_fe_woo_factura_sent_date', current_time('mysql'));
-        $order->update_meta_data('_fe_woo_hacienda_status', 'procesando');
+        if ((string) $order->get_meta('_fe_woo_hacienda_status') === '') {
+            $order->update_meta_data('_fe_woo_hacienda_status', 'procesando');
+        }
         $order->save();
     }
 
     /**
      * Send multi-factura email to customer
      *
-     * Sends a separate email for each factura with its documents attached
+     * Uses WC_Multi_Factura_Email (extends WC_Email) for branded HTML emails.
+     * Sends a separate email for each factura with its documents attached.
      *
      * @param WC_Order $order Order object
      * @param array    $facturas_generated Generated facturas data
      * @param string   $document_type Document type
      */
     private static function send_multi_factura_email($order, $facturas_generated, $document_type = 'tiquete') {
-        // Get customer email
-        if ($document_type === 'factura') {
-            $email = $order->get_meta('_fe_woo_invoice_email');
-            if (empty($email)) {
-                $email = $order->get_billing_email();
-            }
-        } else {
-            $email = $order->get_billing_email();
-        }
+        $mailer = WC()->mailer();
+        $emails = $mailer->get_emails();
 
-        if (empty($email)) {
-            self::log(sprintf('No email found for order #%d, skipping multi-factura email', $order->get_id()), 'error');
+        if (!isset($emails['WC_Multi_Factura_Email'])) {
+            self::log(sprintf('WC_Multi_Factura_Email class not found — cannot send multi-factura emails for order #%d', $order->get_id()), 'error');
             return;
         }
 
-        $document_label_singular = ($document_type === 'factura') ? 'Factura Electrónica' : 'Tiquete Electrónico';
-        $headers = ['Content-Type: text/plain; charset=UTF-8'];
+        // Determine recipient (factura uses invoice email, tiquete uses billing email)
+        $recipient = ($document_type === 'factura')
+            ? ($order->get_meta('_fe_woo_invoice_email') ?: $order->get_billing_email())
+            : $order->get_billing_email();
+
+        if (empty($recipient)) {
+            self::log(sprintf('No recipient email found for order #%d — skipping multi-factura emails', $order->get_id()), 'error');
+            return;
+        }
 
         self::log(sprintf(
-            'Sending %d separate multi-factura emails for order #%d to %s',
+            'Triggering %d separate multi-factura emails for order #%d to %s',
             count($facturas_generated),
             $order->get_id(),
-            $email
+            $recipient
         ));
 
-        $emails_sent = 0;
-        $emails_failed = 0;
+        $emails_triggered = 0;
 
         // Send a separate email for each factura
         foreach ($facturas_generated as $factura) {
-            $type_label = ($factura['type'] === 'service_charge')
-                ? __('Cargo por Servicio', 'fe-woo')
-                : __('Productos', 'fe-woo');
-
-            // Build subject for this factura
-            $subject = sprintf(
-                __('%s #%s - %s (%s) - %s', 'fe-woo'),
-                $document_label_singular,
-                $order->get_order_number(),
-                $factura['emisor_name'],
-                $type_label,
-                get_bloginfo('name')
-            );
-
-            // Build message body for this factura
-            $message = sprintf(
-                __("Estimado/a %s,\n\nAdjunto encontrará su %s correspondiente a la orden #%s.\n\n", 'fe-woo'),
-                $order->get_billing_first_name(),
-                $document_label_singular,
-                $order->get_order_number()
-            );
-
-            $message .= "===========================================\n";
-            $message .= sprintf(__("Emisor: %s\n", 'fe-woo'), $factura['emisor_name']);
-            $message .= sprintf(__("Tipo: %s\n", 'fe-woo'), $type_label);
-            $message .= sprintf(__("Clave: %s\n", 'fe-woo'), $factura['clave']);
-            $message .= sprintf(__("Items: %d\n", 'fe-woo'), $factura['items_count']);
-            $message .= "===========================================\n\n";
-
-            $message .= sprintf(
-                __("Gracias por su compra.\n\n%s", 'fe-woo'),
-                get_bloginfo('name')
-            );
-
             // Get document paths for this factura
             $attachments = [];
             $document_paths = FE_Woo_Document_Storage::get_document_paths($order->get_id(), $factura['clave']);
@@ -838,46 +1263,40 @@ class FE_Woo_Queue_Processor {
                 $attachments[] = $document_paths['pdf'];
             }
 
-            // Add XML
+            // Add signed XML
             if (!empty($document_paths['xml']) && file_exists($document_paths['xml'])) {
                 $attachments[] = $document_paths['xml'];
             }
 
-            // Add Mensaje Receptor
-            if (!empty($document_paths['mensaje_receptor']) && file_exists($document_paths['mensaje_receptor'])) {
-                $attachments[] = $document_paths['mensaje_receptor'];
+            // Add AHC (signed MensajeHacienda acknowledgement)
+            if (!empty($document_paths['acuse_xml']) && file_exists($document_paths['acuse_xml'])) {
+                $attachments[] = $document_paths['acuse_xml'];
             }
 
-            // Send email for this factura
-            $email_result = wp_mail($email, $subject, $message, $headers, $attachments);
+            // Send email for this factura via WC_Multi_Factura_Email
+            $emails['WC_Multi_Factura_Email']->trigger(
+                $order->get_id(),
+                $order,
+                $factura,
+                $document_type,
+                $attachments
+            );
 
-            if ($email_result) {
-                $emails_sent++;
-                self::log(sprintf(
-                    'Multi-factura email sent successfully for factura %s (emisor: %s) to %s for order #%d with %d attachments',
-                    $factura['clave'],
-                    $factura['emisor_name'],
-                    $email,
-                    $order->get_id(),
-                    count($attachments)
-                ));
-            } else {
-                $emails_failed++;
-                self::log(sprintf(
-                    'FAILED to send multi-factura email for factura %s (emisor: %s) to %s for order #%d',
-                    $factura['clave'],
-                    $factura['emisor_name'],
-                    $email,
-                    $order->get_id()
-                ), 'error');
-            }
+            $emails_triggered++;
+            self::log(sprintf(
+                'Multi-factura email triggered for factura %s (emisor: %s) to %s on order #%d with %d attachments',
+                $factura['clave'],
+                $factura['emisor_name'],
+                $recipient,
+                $order->get_id(),
+                count($attachments)
+            ));
         }
 
         self::log(sprintf(
-            'Multi-factura email summary for order #%d: %d sent, %d failed',
+            'Multi-factura email summary for order #%d: %d triggered (delivery depends on mail server)',
             $order->get_id(),
-            $emails_sent,
-            $emails_failed
+            $emails_triggered
         ));
     }
 
@@ -1059,6 +1478,8 @@ class FE_Woo_Queue_Processor {
             $clave = $result['clave'];
             $xml = $result['xml'];
 
+            $xml = self::sign_and_validate($xml, $emisor, (int) $order_id, $clave);
+
             // Send to Hacienda using emisor's specific credentials
             $api_client = new FE_Woo_API_Client();
             $response = $api_client->send_invoice_with_emisor($xml, $emisor);
@@ -1084,22 +1505,18 @@ class FE_Woo_Queue_Processor {
                 $order->update_meta_data('_fe_woo_acuse_file_path', $acuse_result['file_path']);
             }
 
-            // Generate Mensaje Receptor XML (acceptance message to Hacienda)
-            $mensaje_result = FE_Woo_Mensaje_Receptor::generate_mensaje_receptor($order, $clave, $response, $document_type);
-            if ($mensaje_result['success']) {
-                self::log(sprintf('Mensaje Receptor generated successfully for order #%d. Clave: %s', $order_id, $mensaje_result['clave']));
+            // Signed MensajeHacienda XML — best-effort: la respuesta del envío
+            // a veces ya trae el acuse firmado.
+            self::save_acuse_xml_from_response($order_id, $clave, $response);
 
-                $mensaje_save_result = FE_Woo_Document_Storage::save_mensaje_receptor(
-                    $order_id,
-                    $mensaje_result['xml'],
-                    $mensaje_result['clave']
-                );
-
-                if ($mensaje_save_result['success']) {
-                    $order->update_meta_data('_fe_woo_mensaje_receptor_clave', $mensaje_result['clave']);
-                    $order->update_meta_data('_fe_woo_mensaje_receptor_xml', $mensaje_result['xml']);
-                    $order->update_meta_data('_fe_woo_mensaje_receptor_file_path', $mensaje_save_result['file_path']);
-                    $order->save();
+            // Si Hacienda no devolvió el acuse en la misma respuesta del envío,
+            // programar el cron de polling en background. NO bloqueamos la
+            // request HTTP del admin — el browser hará polling vía recheck_status
+            // hasta ver veredicto, y este cron es la red de seguridad si el
+            // browser se cierra antes de que llegue el veredicto.
+            if (!FE_Woo_Document_Storage::get_acuse_xml_path($order_id, $clave)) {
+                if (!wp_next_scheduled(self::POLL_ACUSE_HOOK, [$order_id, $clave, 1])) {
+                    wp_schedule_single_event(time() + 30, self::POLL_ACUSE_HOOK, [$order_id, $clave, 1]);
                 }
             }
 
@@ -1115,38 +1532,57 @@ class FE_Woo_Queue_Processor {
                 }
             }
 
-            // Update order meta
+            // Update order meta. The $order instance here is stale from
+            // the method start — save_acuse_xml_from_response wrote
+            // _fe_woo_hacienda_status via its own fresh order load, so we
+            // must re-read from DB before deciding whether to default to
+            // "procesando".
             $order->update_meta_data('_fe_woo_document_type', $document_type);
             $order->update_meta_data('_fe_woo_factura_clave', $clave);
             $order->update_meta_data('_fe_woo_factura_xml', $xml);
             $order->update_meta_data('_fe_woo_factura_status', 'sent');
             $order->update_meta_data('_fe_woo_factura_sent_date', current_time('mysql'));
-            $order->update_meta_data('_fe_woo_hacienda_status', 'procesando');
             $order->save();
 
-            // Add order note
-            $document_label = ($document_type === 'factura') ? 'Factura Electrónica' : 'Tiquete Electrónico';
-            $order->add_order_note(
-                sprintf(
-                    __('%s generado y enviado exitosamente (ejecución manual). Clave: %s', 'fe-woo'),
-                    $document_label,
-                    $clave
-                )
-            );
+            $fresh = wc_get_order($order_id);
+            if ((string) $fresh->get_meta('_fe_woo_hacienda_status') === '') {
+                $fresh->update_meta_data('_fe_woo_hacienda_status', 'procesando');
+                $fresh->save();
+            }
 
-            self::log(sprintf('Successfully processed order #%d immediately (%s). Clave: %s', $order_id, $document_type, $clave));
+            // Nota del envío. Las notas de veredicto terminal (aceptada /
+            // rechazada con motivo) las agrega save_acuse_xml_from_response
+            // cuando llega el acuse, gateadas por previous_status para
+            // evitar duplicados entre cron, polling JS y re-consulta.
+            $document_label = ($document_type === 'factura') ? 'Factura Electrónica' : 'Tiquete Electrónico';
+            $order->add_order_note(sprintf(
+                __('%s enviada a Hacienda. Clave: %s', 'fe-woo'),
+                $document_label, $clave
+            ));
+
+            $fresh_for_note = wc_get_order($order_id);
+            $verdict = strtolower((string) $fresh_for_note->get_meta('_fe_woo_hacienda_status'));
+            self::log(sprintf('Processed order #%d immediately (%s). Clave: %s. Verdict: %s', $order_id, $document_type, $clave, $verdict ?: 'unknown'));
 
             // Send email to customer
             self::send_factura_email($order, $clave, $document_type);
 
+            // Payload para el frontend: si el veredicto ya es terminal, el
+            // browser no necesita arrancar polling. Si no, pending=true y el
+            // JS hace polling vía recheck_status hasta verlo terminal.
+            $is_terminal = in_array($verdict, ['aceptado', 'rechazado'], true);
+
             return [
-                'success' => true,
-                'message' => sprintf(
+                'success'        => true,
+                'message'        => sprintf(
                     __('%s generado exitosamente. Clave: %s', 'fe-woo'),
                     $document_label,
                     $clave
                 ),
-                'clave' => $clave,
+                'clave'          => $clave,
+                'order_id'       => $order_id,
+                'pending'        => !$is_terminal,
+                'current_status' => $verdict ?: 'procesando',
             ];
 
         } catch (Exception $e) {
@@ -1302,10 +1738,15 @@ class FE_Woo_Queue_Processor {
             '_fe_woo_xml_file_path',
             '_fe_woo_pdf_file_path',
             '_fe_woo_acuse_file_path',
-            '_fe_woo_mensaje_receptor_clave',
-            '_fe_woo_mensaje_receptor_xml',
-            '_fe_woo_mensaje_receptor_file_path',
+            '_fe_woo_acuse_xml_file_path',
+            '_fe_woo_hacienda_detalle',
+            '_fe_woo_hacienda_estado_mensaje',
             '_fe_woo_document_type',
+            '_fe_woo_multi_factura',
+            '_fe_woo_multi_factura_partial',
+            '_fe_woo_facturas_generated',
+            '_fe_woo_facturas_count',
+            '_fe_woo_facturas_expected',
         ];
 
         foreach ($meta_keys as $key) {
@@ -1359,5 +1800,97 @@ class FE_Woo_Queue_Processor {
 
         // Process with force flag
         return self::process_order_immediately($order_id, true);
+    }
+
+    /**
+     * Re-execute an invoice by wiping artifacts and re-queuing the order.
+     *
+     * Unlike regenerate_invoice() this does NOT run synchronously — it deletes
+     * the stored document files, clears invoice metadata and any existing queue
+     * entry, then re-enqueues the order as pending so it is picked up by the
+     * next queue processor run (manual or cron).
+     *
+     * @param int $order_id Order ID
+     * @return array Result with success boolean, message and optional queue_id
+     */
+    public static function reexecute_invoice($order_id) {
+        $order = wc_get_order($order_id);
+
+        if (!$order) {
+            return [
+                'success' => false,
+                'message' => __('Orden no encontrada', 'fe-woo'),
+            ];
+        }
+
+        if ($order instanceof \WC_Order_Refund || $order->get_type() !== 'shop_order') {
+            return [
+                'success' => false,
+                'message' => sprintf(
+                    __('Orden #%d es tipo %s; sólo shop_order genera factura electrónica.', 'fe-woo'),
+                    $order_id,
+                    $order->get_type()
+                ),
+            ];
+        }
+
+        $previous_clave = $order->get_meta('_fe_woo_factura_clave');
+
+        FE_Woo_Document_Storage::delete_order_documents($order_id);
+
+        self::clear_invoice_data($order_id);
+
+        $document_type = ($order->get_meta('_fe_woo_require_factura') === 'yes') ? 'factura' : 'tiquete';
+
+        $queue_id = FE_Woo_Queue::add_to_queue($order_id, null, $document_type);
+
+        if (!$queue_id) {
+            return [
+                'success' => false,
+                'message' => __('No se pudo re-encolar la factura.', 'fe-woo'),
+            ];
+        }
+
+        $order->add_order_note(
+            sprintf(
+                __('Factura electrónica re-encolada: archivos eliminados y orden enviada a la cola para procesamiento. Clave anterior: %s', 'fe-woo'),
+                $previous_clave ?: __('(ninguna)', 'fe-woo')
+            )
+        );
+
+        self::log(sprintf('Re-executed invoice for order #%d (queue_id=%d, previous clave: %s)', $order_id, $queue_id, $previous_clave));
+
+        return [
+            'success' => true,
+            'message' => __('Factura re-encolada. Se procesará en el próximo ciclo de la cola.', 'fe-woo'),
+            'queue_id' => $queue_id,
+        ];
+    }
+
+    /**
+     * Sign an XML with the emisor's XAdES-EPES certificate and validate it
+     * against the Hacienda v4.4 XSD. Dumps the unsigned XML for debugging
+     * when signing fails (only when WP_DEBUG is on).
+     *
+     * Extracted from the three call sites in the queue processor to avoid
+     * 14-line duplication that would drift on future edits.
+     *
+     * @param string $xml Unsigned XML.
+     * @param object $emisor Emisor row (must have `certificate_path` + `certificate_pin`).
+     * @param int    $order_id Order ID for debug dumps.
+     * @param string $clave Invoice clave (or placeholder).
+     * @return string Signed XML.
+     * @throws Exception On signing or validation failure.
+     */
+    private static function sign_and_validate($xml, $emisor, $order_id, $clave) {
+        $unsigned = $xml;
+        try {
+            $signed = FE_Woo_XML_Signer::sign($xml, $emisor->certificate_path, $emisor->certificate_pin);
+        } catch (Exception $e) {
+            FE_Woo_XML_Signer::dump_unsigned_xml((int) $order_id, (string) $clave, $unsigned);
+            throw new Exception('Error al firmar XML: ' . $e->getMessage());
+        }
+        FE_Woo_XML_Validator::validate_or_throw($signed);
+        return $signed;
     }
 }

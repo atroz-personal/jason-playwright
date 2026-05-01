@@ -232,6 +232,51 @@
             "install-path": "../phenx/php-svg-lib"
         },
         {
+            "name": "robrichards/xmlseclibs",
+            "version": "3.1.5",
+            "version_normalized": "3.1.5.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/robrichards/xmlseclibs.git",
+                "reference": "03062be78178cbb5e8f605cd255dc32a14981f92"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/robrichards/xmlseclibs/zipball/03062be78178cbb5e8f605cd255dc32a14981f92",
+                "reference": "03062be78178cbb5e8f605cd255dc32a14981f92",
+                "shasum": ""
+            },
+            "require": {
+                "ext-openssl": "*",
+                "php": ">= 5.4"
+            },
+            "time": "2026-03-13T10:31:56+00:00",
+            "type": "library",
+            "installation-source": "dist",
+            "autoload": {
+                "psr-4": {
+                    "RobRichards\\XMLSecLibs\\": "src"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "BSD-3-Clause"
+            ],
+            "description": "A PHP library for XML Security",
+            "homepage": "https://github.com/robrichards/xmlseclibs",
+            "keywords": [
+                "security",
+                "signature",
+                "xml",
+                "xmldsig"
+            ],
+            "support": {
+                "issues": "https://github.com/robrichards/xmlseclibs/issues",
+                "source": "https://github.com/robrichards/xmlseclibs/tree/3.1.5"
+            },
+            "install-path": "../robrichards/xmlseclibs"
+        },
+        {
             "name": "sabberworm/php-css-parser",
             "version": "v8.9.0",
             "version_normalized": "8.9.0.0",
@@ -302,24 +347,30 @@
         },
         {
             "name": "tecnickcom/tcpdf",
-            "version": "6.10.1",
-            "version_normalized": "6.10.1.0",
+            "version": "6.11.3",
+            "version_normalized": "6.11.3.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/tecnickcom/TCPDF.git",
-                "reference": "7a2701251e5d52fc3d508fd71704683eb54f5939"
+                "reference": "b18f6119161019916c5bb07cb8da5205ae5c1b63"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/tecnickcom/TCPDF/zipball/7a2701251e5d52fc3d508fd71704683eb54f5939",
-                "reference": "7a2701251e5d52fc3d508fd71704683eb54f5939",
+                "url": "https://api.github.com/repos/tecnickcom/TCPDF/zipball/b18f6119161019916c5bb07cb8da5205ae5c1b63",
+                "reference": "b18f6119161019916c5bb07cb8da5205ae5c1b63",
                 "shasum": ""
             },
             "require": {
                 "ext-curl": "*",
                 "php": ">=7.1.0"
             },
-            "time": "2025-11-21T10:58:21+00:00",
+            "suggest": {
+                "ext-gd": "Enables additional image handling in some workflows.",
+                "ext-imagick": "Enables additional image format support when available.",
+                "ext-zlib": "Recommended for compressed streams and related features.",
+                "tecnickcom/tc-lib-pdf": "Modern replacement for TCPDF for new projects."
+            },
+            "time": "2026-04-21T17:00:18+00:00",
             "type": "library",
             "installation-source": "dist",
             "autoload": {
@@ -351,8 +402,8 @@
                     "role": "lead"
                 }
             ],
-            "description": "TCPDF is a PHP class for generating PDF documents and barcodes.",
-            "homepage": "http://www.tcpdf.org/",
+            "description": "Deprecated legacy PDF engine for PHP. For new projects use tecnickcom/tc-lib-pdf.",
+            "homepage": "https://tcpdf.org",
             "keywords": [
                 "PDFD32000-2008",
                 "TCPDF",
@@ -364,12 +415,12 @@
             ],
             "support": {
                 "issues": "https://github.com/tecnickcom/TCPDF/issues",
-                "source": "https://github.com/tecnickcom/TCPDF/tree/6.10.1"
+                "source": "https://github.com/tecnickcom/TCPDF"
             },
             "funding": [
                 {
                     "url": "https://www.paypal.com/donate/?hosted_button_id=NZUEC5XS8MFBJ",
-                    "type": "custom"
+                    "type": "paypal"
                 }
             ],
             "install-path": "../tecnickcom/tcpdf"

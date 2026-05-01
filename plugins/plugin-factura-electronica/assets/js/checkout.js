@@ -399,7 +399,10 @@ jQuery(document).ready(function($) {
                     var data = response.data.data;
 
                     if (data.nombre)        { $('#fe_woo_full_name').val(data.nombre); }
-                    if (data.activity_code) { $('#fe_woo_activity_code').val(data.activity_code); }
+                    // activity_code NO se auto-rellena: el código devuelto por
+                    // el autocompletar de Hacienda no siempre es uno aceptado
+                    // por el endpoint de recepción para esa cédula (bug -411).
+                    // El cliente lo escribe manualmente sólo si lo conoce.
                     if (data.invoice_email && !$('#fe_woo_invoice_email').val()) {
                         $('#fe_woo_invoice_email').val(data.invoice_email);
                     }

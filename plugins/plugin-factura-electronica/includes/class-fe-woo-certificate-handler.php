@@ -166,6 +166,9 @@ class FE_Woo_Certificate_Handler {
             @unlink($old_cert);
         }
 
+        // Invalidate cached cert status — cert just changed.
+        self::bust_cached_status();
+
         return [
             'success' => true,
             'file_path' => $upload_path,
@@ -313,6 +316,47 @@ class FE_Woo_Certificate_Handler {
     }
 
     /**
+     * Load cryptographic material from a PKCS12 file for XML signing.
+     *
+     * @param string $cert_path Absolute path to .p12/.pfx.
+     * @param string $pin Certificate PIN (plaintext).
+     * @return array {cert: string PEM, pkey: string PEM, chain: string[], x509_parsed: array}
+     * @throws Exception If file unreadable, PIN wrong, or certificate expired.
+     */
+    public static function load_key_material($cert_path, $pin) {
+        if (!is_readable($cert_path)) {
+            throw new Exception(sprintf(__('Certificado no encontrado o ilegible: %s', 'fe-woo'), $cert_path));
+        }
+        $pkcs12 = file_get_contents($cert_path);
+        if ($pkcs12 === false) {
+            throw new Exception(__('Error al leer el archivo de certificado.', 'fe-woo'));
+        }
+        $certs = [];
+        if (!openssl_pkcs12_read($pkcs12, $certs, (string) $pin)) {
+            throw new Exception(__('No se pudo abrir el certificado (PIN incorrecto o archivo corrupto).', 'fe-woo'));
+        }
+        if (empty($certs['cert']) || empty($certs['pkey'])) {
+            throw new Exception(__('El certificado no contiene clave privada o certificado público.', 'fe-woo'));
+        }
+        $parsed = openssl_x509_parse($certs['cert']);
+        if (!$parsed) {
+            throw new Exception(__('Certificado PEM inválido (no se pudo parsear X.509).', 'fe-woo'));
+        }
+        if (isset($parsed['validTo_time_t']) && $parsed['validTo_time_t'] < time()) {
+            throw new Exception(sprintf(
+                __('Certificado expirado el %s.', 'fe-woo'),
+                date('Y-m-d', $parsed['validTo_time_t'])
+            ));
+        }
+        return [
+            'cert'        => $certs['cert'],
+            'pkey'        => $certs['pkey'],
+            'chain'       => isset($certs['extracerts']) ? $certs['extracerts'] : [],
+            'x509_parsed' => $parsed,
+        ];
+    }
+
+    /**
      * Get certificate information
      *
      * @param string $cert_path Path to certificate file
@@ -349,7 +393,9 @@ class FE_Woo_Certificate_Handler {
      */
     public static function delete_certificate($cert_path) {
         if (!empty($cert_path) && file_exists($cert_path)) {
-            return @unlink($cert_path);
+            $ok = @unlink($cert_path);
+            self::bust_cached_status();
+            return $ok;
         }
         return false;
     }
@@ -410,5 +456,37 @@ class FE_Woo_Certificate_Handler {
             'message' => __('El certificado es válido', 'fe-woo'),
             'cert_info' => $cert_info,
         ];
+    }
+
+    /**
+     * Cached version of get_status() for use en admin_notices y otros loops
+     * de pageload. Re-checkea cada hora; el cert no cambia más rápido y leerlo
+     * + parsearlo con openssl en cada pageload es costoso.
+     *
+     * Se invalida implícitamente cuando se sube un nuevo cert (via delete del
+     * transient en upload_certificate / delete_certificate).
+     *
+     * @return array Mismo shape que get_status().
+     */
+    public static function get_cached_status() {
+        $cache_key = 'fe_woo_cert_status';
+        $cached = get_transient($cache_key);
+        if (is_array($cached)) {
+            return $cached;
+        }
+        $status = self::get_status();
+        // No cachear estados sin cert / sin pin — son cheap de checkear y el
+        // usuario los está activamente resolviendo.
+        if (in_array($status['status'], ['valid', 'expiring', 'invalid'], true)) {
+            set_transient($cache_key, $status, HOUR_IN_SECONDS);
+        }
+        return $status;
+    }
+
+    /**
+     * Bust the cached cert status (call después de upload/delete).
+     */
+    public static function bust_cached_status() {
+        delete_transient('fe_woo_cert_status');
     }
 }

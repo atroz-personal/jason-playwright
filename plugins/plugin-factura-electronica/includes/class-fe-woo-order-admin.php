@@ -36,6 +36,8 @@ class FE_Woo_Order_Admin {
 
         // AJAX handlers
         add_action('wp_ajax_fe_woo_manual_execute_factura', [__CLASS__, 'ajax_manual_execute_factura']);
+        add_action('wp_ajax_fe_woo_recheck_status', [__CLASS__, 'ajax_recheck_status']);
+        add_action('wp_ajax_fe_woo_retry_with_updated_data', [__CLASS__, 'ajax_retry_with_updated_data']);
         add_action('wp_ajax_fe_woo_download_all_documents', [__CLASS__, 'ajax_download_all_documents']);
         add_action('wp_ajax_fe_woo_download_all_multi_factura', [__CLASS__, 'ajax_download_all_multi_factura']);
         add_action('wp_ajax_fe_woo_download_nota_docs', [__CLASS__, 'ajax_download_nota_docs']);
@@ -81,6 +83,8 @@ class FE_Woo_Order_Admin {
         $clave = $order->get_meta('_fe_woo_factura_clave');
         $status = $order->get_meta('_fe_woo_factura_status');
         $hacienda_status = $order->get_meta('_fe_woo_hacienda_status');
+        $hacienda_estado_mensaje = $order->get_meta('_fe_woo_hacienda_estado_mensaje');
+        $hacienda_detalle = $order->get_meta('_fe_woo_hacienda_detalle');
         $sent_date = $order->get_meta('_fe_woo_factura_sent_date');
         $last_checked = $order->get_meta('_fe_woo_status_last_checked');
 
@@ -450,6 +454,51 @@ class FE_Woo_Order_Admin {
                             <span class="fe-woo-hacienda-status-badge fe-woo-hacienda-<?php echo esc_attr($hacienda_status); ?>">
                                 <?php echo esc_html(self::get_hacienda_status_label($hacienda_status)); ?>
                             </span>
+                            <?php if ($hacienda_estado_mensaje && strcasecmp($hacienda_estado_mensaje, $hacienda_status) !== 0) : ?>
+                                <span style="color: #666; font-size: 12px; margin-left: 6px;">(<?php echo esc_html($hacienda_estado_mensaje); ?>)</span>
+                            <?php endif; ?>
+                        </p>
+                    <?php endif; ?>
+
+                    <?php if ($hacienda_detalle) : ?>
+                        <?php
+                        // Color-code the block: green when accepted, red when rejected, neutral otherwise.
+                        $is_rejected = ($hacienda_status === 'rechazado');
+                        $is_accepted = ($hacienda_status === 'aceptado');
+                        $bg = $is_rejected ? '#fdecea' : ($is_accepted ? '#e8f5e9' : '#f5f5f5');
+                        $border = $is_rejected ? '#d32f2f' : ($is_accepted ? '#4caf50' : '#9e9e9e');
+                        ?>
+                        <div style="margin-top: 8px; padding: 10px 12px; background: <?php echo esc_attr($bg); ?>; border-left: 3px solid <?php echo esc_attr($border); ?>; font-size: 12px; white-space: pre-wrap; max-height: 220px; overflow: auto;">
+                            <strong style="display: block; margin-bottom: 4px;"><?php esc_html_e('Mensaje de Hacienda:', 'fe-woo'); ?></strong>
+                            <?php echo esc_html($hacienda_detalle); ?>
+                        </div>
+                    <?php endif; ?>
+
+                    <?php if (in_array($hacienda_status, ['procesando', 'recibido'], true)) : ?>
+                        <p style="margin-top: 8px;">
+                            <button type="button"
+                                    class="button fe-woo-recheck-status"
+                                    data-order-id="<?php echo esc_attr($order_id); ?>"
+                                    style="width: 100%;">
+                                <?php esc_html_e('Volver a consultar a Hacienda', 'fe-woo'); ?>
+                            </button>
+                            <span style="display:block; margin-top:6px; font-size:11px; color:#666;">
+                                <?php esc_html_e('Pregunta a Hacienda si ya hay veredicto final.', 'fe-woo'); ?>
+                            </span>
+                        </p>
+                    <?php endif; ?>
+
+                    <?php if ($hacienda_status === 'rechazado') : ?>
+                        <p style="margin-top: 10px;">
+                            <button type="button"
+                                    class="button button-primary fe-woo-retry-with-updated-data"
+                                    data-order-id="<?php echo esc_attr($order_id); ?>"
+                                    style="width: 100%; background:#d32f2f; border-color:#d32f2f;">
+                                <?php esc_html_e('Reintentar', 'fe-woo'); ?>
+                            </button>
+                            <span style="display:block; margin-top:6px; font-size:11px; color:#666;">
+                                <?php esc_html_e('Descarta la factura rechazada y genera una nueva con los datos actuales del emisor. Úsalo solo después de corregir la causa del rechazo.', 'fe-woo'); ?>
+                            </span>
                         </p>
                     <?php endif; ?>
 
@@ -469,19 +518,21 @@ class FE_Woo_Order_Admin {
                 <?php endif; ?>
 
                 <?php
-                // Show document downloads ONLY for single factura (not multi-factura)
-                // Multi-factura documents are shown in the multi-factura section above
-                if (!$is_multi_factura && FE_Woo_Document_Storage::documents_exist($order_id, $clave)) :
+                // Show document downloads ONLY when Hacienda has accepted the
+                // comprobante. A rejected factura is NOT a valid fiscal
+                // document — the operator must not send the PDF to the
+                // customer, the XML is not authoritative (it was never signed
+                // into Hacienda's ledger) and exposing either creates
+                // confusion. Multi-factura docs live in their own section
+                // above and follow the same rule there.
+                if (
+                    !$is_multi_factura
+                    && $hacienda_status === 'aceptado'
+                    && FE_Woo_Document_Storage::documents_exist($order_id, $clave)
+                ) :
                     $document_paths = FE_Woo_Document_Storage::get_document_paths($order_id, $clave);
                     $xml_url = FE_Woo_Document_Storage::get_download_url($order_id, $clave, 'xml');
                     $pdf_url = FE_Woo_Document_Storage::get_download_url($order_id, $clave, 'pdf');
-
-                    // Get mensaje receptor clave and URL
-                    $mensaje_receptor_clave = $order->get_meta('_fe_woo_mensaje_receptor_clave');
-                    $mensaje_receptor_url = null;
-                    if ($mensaje_receptor_clave && isset($document_paths['mensaje_receptor'])) {
-                        $mensaje_receptor_url = FE_Woo_Document_Storage::get_download_url($order_id, $mensaje_receptor_clave, 'mensaje_receptor');
-                    }
                 ?>
                     <div style="margin-top: 15px; padding: 12px; background: #f5f5f5; border-radius: 4px;">
                         <strong><?php esc_html_e('Documentos Generados:', 'fe-woo'); ?></strong>
@@ -508,14 +559,18 @@ class FE_Woo_Order_Admin {
                                     </span>
                                 </li>
                             <?php endif; ?>
-                            <?php if ($mensaje_receptor_url && isset($document_paths['mensaje_receptor'])) : ?>
+                            <?php
+                            $acuse_xml_url = !empty($document_paths['acuse_xml'])
+                                ? FE_Woo_Document_Storage::get_download_url($order_id, $clave, 'acuse_xml')
+                                : null;
+                            if ($acuse_xml_url) : ?>
                                 <li style="margin: 5px 0;">
-                                    <span class="dashicons dashicons-upload" style="color: #ff9800;"></span>
-                                    <a href="<?php echo esc_url($mensaje_receptor_url); ?>" target="_blank" style="text-decoration: none; font-weight: 600;">
-                                        <?php esc_html_e('XML Mensaje Receptor (Acuse)', 'fe-woo'); ?>
+                                    <span class="dashicons dashicons-yes-alt" style="color: #4caf50;"></span>
+                                    <a href="<?php echo esc_url($acuse_xml_url); ?>" target="_blank" style="text-decoration: none; font-weight: 600;">
+                                        <?php esc_html_e('Acuse de Hacienda (AHC)', 'fe-woo'); ?>
                                     </a>
                                     <span style="color: #666; font-size: 11px;">
-                                        (<?php echo esc_html(FE_Woo_Document_Storage::get_file_size($document_paths['mensaje_receptor'])); ?>)
+                                        (<?php echo esc_html(FE_Woo_Document_Storage::get_file_size($document_paths['acuse_xml'])); ?>)
                                     </span>
                                 </li>
                             <?php endif; ?>
@@ -530,10 +585,10 @@ class FE_Woo_Order_Admin {
                     </div>
                 <?php endif; ?>
 
-                <?php if (!$is_multi_factura) : ?>
+                <?php if (!$is_multi_factura && $hacienda_status === 'aceptado') : ?>
                 <p style="padding: 10px; background: #e8f5e9; border-left: 3px solid #4caf50; font-size: 12px; margin-top: 15px;">
-                    <strong><?php esc_html_e('✓ Factura Enviada Exitosamente', 'fe-woo'); ?></strong><br>
-                    <?php esc_html_e('La factura ha sido aceptada por Hacienda. Para verificar el estado final, consulte el portal web de Hacienda.', 'fe-woo'); ?>
+                    <strong><?php esc_html_e('✓ Factura aceptada por Hacienda', 'fe-woo'); ?></strong><br>
+                    <?php esc_html_e('El comprobante fue validado y aceptado. Los documentos están disponibles para descarga.', 'fe-woo'); ?>
                 </p>
 
                 <!-- Notas de Crédito/Débito Section -->
@@ -574,17 +629,7 @@ class FE_Woo_Order_Admin {
                             // Check if documents exist for this note
                             $nota_paths = FE_Woo_Document_Storage::get_document_paths($order_id, $nota_clave);
 
-                            // Get mensaje receptor for this note if it exists
-                            $mensaje_receptor_clave = isset($nota['mensaje_receptor_clave']) ? $nota['mensaje_receptor_clave'] : null;
-                            $mensaje_receptor_url = null;
-                            if ($mensaje_receptor_clave) {
-                                $mensaje_receptor_path = FE_Woo_Document_Storage::get_mensaje_receptor_path($order_id, $mensaje_receptor_clave);
-                                if ($mensaje_receptor_path && file_exists($mensaje_receptor_path)) {
-                                    $mensaje_receptor_url = FE_Woo_Document_Storage::get_download_url($order_id, $mensaje_receptor_clave, 'mensaje_receptor');
-                                }
-                            }
-
-                            if (!empty($nota_paths['xml']) || !empty($nota_paths['pdf']) || $mensaje_receptor_url) :
+                            if (!empty($nota_paths['xml']) || !empty($nota_paths['pdf'])) :
                             ?>
                                 <div style="margin-top: 12px; padding: 12px; background: #f5f5f5; border-radius: 4px;">
                                     <strong><?php esc_html_e('Documentos Generados:', 'fe-woo'); ?></strong>
@@ -611,15 +656,16 @@ class FE_Woo_Order_Admin {
                                                 </span>
                                             </li>
                                         <?php endif; ?>
-                                        <?php if ($mensaje_receptor_url) : ?>
-                                            <?php $mensaje_receptor_path = FE_Woo_Document_Storage::get_mensaje_receptor_path($order_id, $mensaje_receptor_clave); ?>
+                                        <?php
+                                        $nota_acuse_xml_path = FE_Woo_Document_Storage::get_acuse_xml_path($order_id, $nota_clave);
+                                        if ($nota_acuse_xml_path) : ?>
                                             <li style="margin: 5px 0;">
-                                                <span class="dashicons dashicons-upload" style="color: #ff9800;"></span>
-                                                <a href="<?php echo esc_url($mensaje_receptor_url); ?>" target="_blank" style="text-decoration: none; font-weight: 600;">
-                                                    <?php esc_html_e('XML Mensaje Receptor (Acuse)', 'fe-woo'); ?>
+                                                <span class="dashicons dashicons-yes-alt" style="color: #4caf50;"></span>
+                                                <a href="<?php echo esc_url(FE_Woo_Document_Storage::get_download_url($order_id, $nota_clave, 'acuse_xml')); ?>" target="_blank" style="text-decoration: none; font-weight: 600;">
+                                                    <?php esc_html_e('Acuse de Hacienda (AHC)', 'fe-woo'); ?>
                                                 </a>
                                                 <span style="color: #666; font-size: 11px;">
-                                                    (<?php echo esc_html(FE_Woo_Document_Storage::get_file_size($mensaje_receptor_path)); ?>)
+                                                    (<?php echo esc_html(FE_Woo_Document_Storage::get_file_size($nota_acuse_xml_path)); ?>)
                                                 </span>
                                             </li>
                                         <?php endif; ?>
@@ -751,6 +797,7 @@ class FE_Woo_Order_Admin {
                     </details>
                 </div>
                 <?php endif; ?>
+
             <?php endif; ?>
         </div>
 
@@ -1067,6 +1114,86 @@ class FE_Woo_Order_Admin {
      * Processes the invoice immediately (synchronously), not via queue
      * Only allows execution if order status is "completed"
      */
+    /**
+     * Validate that the order's receptor metadata is complete enough to
+     * generate a factura electrónica. Returns a list of human-readable labels
+     * for missing/invalid fields. Empty array means valid.
+     *
+     * Critical fields (always required):
+     *   - Tipo de Identificación, Número de Identificación
+     *   - Nombre Completo o Razón Social
+     *   - Correo Electrónico para Factura
+     *   - Provincia, Cantón, Distrito, Otras Señas (XSD UbicacionType)
+     *
+     * Conditional:
+     *   - Código de actividad económica when id_type is "02" (Cédula Jurídica).
+     *
+     * Telefono is intentionally optional: XSD v4.4 marks it minOccurs=0 and
+     * the checkout/POS forms allow it blank.
+     *
+     * @param WC_Order $order
+     * @return array<int,string> Labels of missing fields (empty if valid).
+     */
+    private static function validate_receptor_data($order) {
+        $missing = [];
+
+        // Si el checkbox FE no está marcado la orden va como Tiquete Electrónico
+        // (TiqueteElectronico v4.4) que NO emite bloque Receptor — saltar la
+        // validación entera. El downstream (process_order_immediately) ya
+        // elige factura vs tiquete a partir de esta misma meta.
+        if ($order->get_meta('_fe_woo_require_factura') !== 'yes') {
+            return [];
+        }
+
+        $required = [
+            '_fe_woo_id_type'       => __('Tipo de Identificación', 'fe-woo'),
+            '_fe_woo_id_number'     => __('Número de Identificación', 'fe-woo'),
+            '_fe_woo_full_name'     => __('Nombre Completo o Razón Social', 'fe-woo'),
+            '_fe_woo_invoice_email' => __('Correo Electrónico para Factura', 'fe-woo'),
+            '_fe_woo_provincia'     => __('Provincia', 'fe-woo'),
+            '_fe_woo_canton'        => __('Cantón', 'fe-woo'),
+            '_fe_woo_distrito'      => __('Distrito', 'fe-woo'),
+            '_fe_woo_otras_senas'   => __('Otras Señas', 'fe-woo'),
+        ];
+
+        foreach ($required as $meta_key => $label) {
+            $value = trim((string) $order->get_meta($meta_key));
+            if ($value === '') {
+                $missing[] = $label;
+            }
+        }
+
+        // Activity code receptor — opcional según XSD v4.4 (CodigoActividadReceptor
+        // tiene minOccurs=0). Hacienda valida solo el CodigoActividadEmisor en
+        // el comprobante. Auto-rellenarlo desde el catálogo de autocompletar
+        // produjo rechazos -411 (catálogo de autocompletar ≠ catálogo de
+        // recepción). Lo dejamos opcional: se emite solo si el cliente lo
+        // escribe conscientemente.
+
+        // If all three location codes are present, validate the combination
+        // exists in the catalog so we don't ship junk to Hacienda.
+        $prov = (string) $order->get_meta('_fe_woo_provincia');
+        $cant = (string) $order->get_meta('_fe_woo_canton');
+        $dist = (string) $order->get_meta('_fe_woo_distrito');
+        if ($prov !== '' && $cant !== '' && $dist !== ''
+            && class_exists('FE_Woo_CR_Locations')
+            && !FE_Woo_CR_Locations::validate($prov, $cant, $dist)
+        ) {
+            $missing[] = __('Combinación de provincia/cantón/distrito no es válida', 'fe-woo');
+        }
+
+        // Otras Señas length per XSD v4.4 (5–250 chars).
+        $otras = trim((string) $order->get_meta('_fe_woo_otras_senas'));
+        if ($otras !== '') {
+            $otras_len = function_exists('mb_strlen') ? mb_strlen($otras) : strlen($otras);
+            if ($otras_len < 5) {
+                $missing[] = __('Otras Señas (mínimo 5 caracteres)', 'fe-woo');
+            }
+        }
+
+        return $missing;
+    }
+
     public static function ajax_manual_execute_factura() {
         check_ajax_referer('fe_woo_admin', 'nonce');
 
@@ -1096,6 +1223,18 @@ class FE_Woo_Order_Admin {
             ]);
         }
 
+        // Pre-flight: validar que el Receptor tiene todos los datos requeridos
+        // ANTES de tocar la cola o llamar a Hacienda. Si falta algo respondemos
+        // con la lista de campos faltantes y no se gasta una llamada.
+        $missing = self::validate_receptor_data($order);
+        if (!empty($missing)) {
+            wp_send_json_error([
+                'message' => __('No se puede generar la factura electrónica. Faltan datos del receptor:', 'fe-woo')
+                    . ' ' . implode(', ', $missing) . '.',
+                'missing_fields' => $missing,
+            ]);
+        }
+
         // Process order immediately (this will also remove from queue if exists)
         $result = FE_Woo_Queue_Processor::process_order_immediately($order_id);
 
@@ -1109,6 +1248,139 @@ class FE_Woo_Order_Admin {
                 'message' => $result['message'],
             ]);
         }
+    }
+
+    /**
+     * AJAX handler for the "Volver a consultar a Hacienda" button.
+     *
+     * Purely a re-query — it does NOT resend or regenerate anything.
+     * If the document is "rechazado" the verdict stays rechazado unless
+     * Hacienda itself changed it server-side. To retry a rejected
+     * document with new data, the operator fixes the emisor config and
+     * uses the "Ejecutar" button (which goes through the queue and
+     * generates a fresh clave).
+     */
+    public static function ajax_recheck_status() {
+        check_ajax_referer('fe_woo_admin', 'nonce');
+
+        if (!current_user_can('edit_shop_orders')) {
+            wp_send_json_error(['message' => __('Permiso denegado', 'fe-woo')]);
+        }
+
+        $order_id = isset($_POST['order_id']) ? absint($_POST['order_id']) : 0;
+        if (!$order_id) {
+            wp_send_json_error(['message' => __('ID de orden inválido', 'fe-woo')]);
+        }
+
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            wp_send_json_error(['message' => __('Orden no encontrada', 'fe-woo')]);
+        }
+
+        $clave = $order->get_meta('_fe_woo_factura_clave');
+        if (!$clave) {
+            wp_send_json_error(['message' => __('La orden no tiene clave asociada.', 'fe-woo')]);
+        }
+
+        try {
+            $client = new FE_Woo_API_Client();
+            $result = $client->query_invoice_status($clave);
+        } catch (Exception $e) {
+            wp_send_json_error(['message' => $e->getMessage()]);
+        }
+
+        $saved = FE_Woo_Queue_Processor::save_acuse_xml_from_response($order_id, $clave, $result);
+        $payload = isset($result['data']) && is_array($result['data']) ? $result['data'] : [];
+        $ind = isset($payload['ind-estado']) ? strtolower((string) $payload['ind-estado']) : '';
+
+        $order = wc_get_order($order_id);
+        wp_send_json_success([
+            'saved_xml'       => $saved,
+            'hacienda_status' => $order->get_meta('_fe_woo_hacienda_status'),
+            'estado_mensaje'  => $order->get_meta('_fe_woo_hacienda_estado_mensaje'),
+            'detalle'         => $order->get_meta('_fe_woo_hacienda_detalle'),
+            'ind_estado'      => $ind,
+            'message'         => $saved
+                ? __('Consulta completada. La página se actualizará.', 'fe-woo')
+                : ($ind ? sprintf(__('Hacienda reporta estado: %s', 'fe-woo'), $ind) : __('Hacienda aún no tiene respuesta final.', 'fe-woo')),
+        ]);
+    }
+
+    /**
+     * AJAX handler for "Reintentar con datos actualizados" (rejected-only).
+     *
+     * A rejected comprobante has no fiscal existence and its clave is
+     * final on Hacienda's side. The operator typically gets here after
+     * fixing the emisor config (cédula, actividad económica, ubicación),
+     * and needs to re-submit as a fresh document. We wipe the previous
+     * attempt's meta and run the full immediate-processing pipeline,
+     * which generates a new clave with the current emisor data, signs
+     * it, POSTs it, and polls for the verdict inline.
+     */
+    public static function ajax_retry_with_updated_data() {
+        check_ajax_referer('fe_woo_admin', 'nonce');
+
+        if (!current_user_can('edit_shop_orders')) {
+            wp_send_json_error(['message' => __('Permiso denegado', 'fe-woo')]);
+        }
+
+        $order_id = isset($_POST['order_id']) ? absint($_POST['order_id']) : 0;
+        if (!$order_id) {
+            wp_send_json_error(['message' => __('ID de orden inválido', 'fe-woo')]);
+        }
+
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            wp_send_json_error(['message' => __('Orden no encontrada', 'fe-woo')]);
+        }
+
+        // Safety check — this action only applies to rejected documents.
+        // Processing or accepted orders shouldn't hit this path; if they
+        // do, refuse rather than silently clobbering a valid factura.
+        $current_status = strtolower((string) $order->get_meta('_fe_woo_hacienda_status'));
+        if ($current_status !== 'rechazado') {
+            wp_send_json_error([
+                'message' => sprintf(
+                    __('Solo se puede reintentar cuando el estado es "rechazado". Estado actual: %s', 'fe-woo'),
+                    $current_status ?: 'desconocido'
+                ),
+            ]);
+        }
+
+        $meta_to_clear = [
+            '_fe_woo_factura_clave',
+            '_fe_woo_factura_xml',
+            '_fe_woo_hacienda_status',
+            '_fe_woo_hacienda_estado_mensaje',
+            '_fe_woo_hacienda_detalle',
+            '_fe_woo_hacienda_response',
+            '_fe_woo_acuse_xml_file_path',
+            '_fe_woo_acuse_file_path',
+            '_fe_woo_xml_file_path',
+            '_fe_woo_pdf_file_path',
+            '_fe_woo_factura_sent_date',
+            '_fe_woo_status_last_checked',
+        ];
+        foreach ($meta_to_clear as $k) {
+            $order->delete_meta_data($k);
+        }
+        $order->save();
+
+        try {
+            $result = FE_Woo_Queue_Processor::process_order_immediately($order_id, true);
+        } catch (Exception $e) {
+            wp_send_json_error(['message' => $e->getMessage()]);
+        }
+
+        $order = wc_get_order($order_id);
+        $new_status = $order->get_meta('_fe_woo_hacienda_status');
+        wp_send_json_success([
+            'hacienda_status' => $new_status,
+            'estado_mensaje'  => $order->get_meta('_fe_woo_hacienda_estado_mensaje'),
+            'message'         => $new_status === 'aceptado'
+                ? __('Factura reprocesada y aceptada por Hacienda.', 'fe-woo')
+                : __('Factura reprocesada. Revisa el nuevo estado.', 'fe-woo'),
+        ]);
     }
 
     /**
@@ -1225,9 +1497,9 @@ class FE_Woo_Order_Admin {
                 $files_to_zip[$prefix . '-factura.' . $ext] = $document_paths['pdf'];
             }
 
-            // Add Mensaje Receptor
-            if (!empty($document_paths['mensaje_receptor']) && file_exists($document_paths['mensaje_receptor'])) {
-                $files_to_zip[$prefix . '-mensaje-receptor.xml'] = $document_paths['mensaje_receptor'];
+            // Add Acuse de Hacienda (AHC) — signed MensajeHacienda
+            if (!empty($document_paths['acuse_xml']) && file_exists($document_paths['acuse_xml'])) {
+                $files_to_zip[$prefix . '-AHC.xml'] = $document_paths['acuse_xml'];
             }
         }
 
@@ -1335,28 +1607,18 @@ class FE_Woo_Order_Admin {
                         $files_to_zip['nota_' . $nota_clave . '_pdf'] = $nota_paths['pdf'];
                     }
 
-                    // Add note's mensaje receptor
-                    if (isset($nota['mensaje_receptor_clave'])) {
-                        $mensaje_receptor_path = FE_Woo_Document_Storage::get_mensaje_receptor_path($order_id, $nota['mensaje_receptor_clave']);
-                        if ($mensaje_receptor_path && file_exists($mensaje_receptor_path)) {
-                            $files_to_zip['nota_' . $nota_clave . '_mensaje_receptor'] = $mensaje_receptor_path;
-                        }
+                    // Add note's Acuse de Hacienda (AHC)
+                    $nota_acuse = FE_Woo_Document_Storage::get_acuse_xml_path($order_id, $nota_clave);
+                    if ($nota_acuse) {
+                        $files_to_zip['nota_' . $nota_clave . '_AHC'] = $nota_acuse;
                     }
                 }
             }
         } else {
-            // This is a note ZIP - check if note has mensaje receptor
-            $notas = $order->get_meta('_fe_woo_notas');
-            if (is_array($notas)) {
-                foreach ($notas as $nota) {
-                    if ($nota['clave'] === $clave && isset($nota['mensaje_receptor_clave'])) {
-                        $mensaje_receptor_path = FE_Woo_Document_Storage::get_mensaje_receptor_path($order_id, $nota['mensaje_receptor_clave']);
-                        if ($mensaje_receptor_path && file_exists($mensaje_receptor_path)) {
-                            $files_to_zip['mensaje_receptor'] = $mensaje_receptor_path;
-                        }
-                        break;
-                    }
-                }
+            // This is a note ZIP — add the Acuse de Hacienda for it.
+            $nota_acuse = FE_Woo_Document_Storage::get_acuse_xml_path($order_id, $clave);
+            if ($nota_acuse) {
+                $files_to_zip['AHC'] = $nota_acuse;
             }
         }
 
@@ -1494,6 +1756,8 @@ class FE_Woo_Order_Admin {
                 'preparingZip' => __('Preparando descarga...', 'fe-woo'),
                 'error' => __('Error', 'fe-woo'),
                 'success' => __('Éxito', 'fe-woo'),
+                'reexecuting' => __('Re-encolando...', 'fe-woo'),
+                'reexecuteConfirm' => __('Esto eliminará los archivos generados (XML, PDF, acuse) y regresará la orden a la cola para volver a procesarla. ¿Continuar?', 'fe-woo'),
             ],
         ]);
 

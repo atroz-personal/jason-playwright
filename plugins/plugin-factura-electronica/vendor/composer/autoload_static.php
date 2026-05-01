@@ -12,6 +12,10 @@ class ComposerStaticInit52f211310d82d92cbf09477a6c68e162
             'Svg\\' => 4,
             'Sabberworm\\CSS\\' => 15,
         ),
+        'R' =>
+        array (
+            'RobRichards\\XMLSecLibs\\' => 23,
+        ),
         'M' =>
         array (
             'Masterminds\\' => 12,
@@ -34,6 +38,10 @@ class ComposerStaticInit52f211310d82d92cbf09477a6c68e162
         'Sabberworm\\CSS\\' =>
         array (
             0 => __DIR__ . '/..' . '/sabberworm/php-css-parser/src',
+        ),
+        'RobRichards\\XMLSecLibs\\' =>
+        array (
+            0 => __DIR__ . '/..' . '/robrichards/xmlseclibs/src',
         ),
         'Masterminds\\' =>
         array (
@@ -181,6 +189,10 @@ class ComposerStaticInit52f211310d82d92cbf09477a6c68e162
         'Masterminds\\HTML5\\Serializer\\Traverser' => __DIR__ . '/..' . '/masterminds/html5/src/HTML5/Serializer/Traverser.php',
         'PDF417' => __DIR__ . '/..' . '/tecnickcom/tcpdf/include/barcodes/pdf417.php',
         'QRcode' => __DIR__ . '/..' . '/tecnickcom/tcpdf/include/barcodes/qrcode.php',
+        'RobRichards\\XMLSecLibs\\Utils\\XPath' => __DIR__ . '/..' . '/robrichards/xmlseclibs/src/Utils/XPath.php',
+        'RobRichards\\XMLSecLibs\\XMLSecEnc' => __DIR__ . '/..' . '/robrichards/xmlseclibs/src/XMLSecEnc.php',
+        'RobRichards\\XMLSecLibs\\XMLSecurityDSig' => __DIR__ . '/..' . '/robrichards/xmlseclibs/src/XMLSecurityDSig.php',
+        'RobRichards\\XMLSecLibs\\XMLSecurityKey' => __DIR__ . '/..' . '/robrichards/xmlseclibs/src/XMLSecurityKey.php',
         'Sabberworm\\CSS\\CSSElement' => __DIR__ . '/..' . '/sabberworm/php-css-parser/src/CSSElement.php',
         'Sabberworm\\CSS\\CSSList\\AtRuleBlockList' => __DIR__ . '/..' . '/sabberworm/php-css-parser/src/CSSList/AtRuleBlockList.php',
         'Sabberworm\\CSS\\CSSList\\CSSBlockList' => __DIR__ . '/..' . '/sabberworm/php-css-parser/src/CSSList/CSSBlockList.php',

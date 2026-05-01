@@ -554,6 +554,13 @@ class FE_Woo_Emisor_Manager {
             $errors[] = __('El nombre legal es requerido.', 'fe-woo');
         }
 
+        // NombreComercial es requerido por el XSD v4.4 del proyecto (maxLength=80).
+        if (empty($data['nombre_comercial'])) {
+            $errors[] = __('El nombre comercial es requerido.', 'fe-woo');
+        } elseif (mb_strlen($data['nombre_comercial']) > 80) {
+            $errors[] = __('El nombre comercial no puede exceder 80 caracteres.', 'fe-woo');
+        }
+
         if (empty($data['cedula_juridica'])) {
             $errors[] = __('La cédula jurídica es requerida.', 'fe-woo');
         } else {

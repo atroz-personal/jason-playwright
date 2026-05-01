@@ -52,8 +52,54 @@ class FE_Woo_PDF_Generator {
                 }
             }
 
-            // Create PDF using TCPDF
-            $pdf = new TCPDF('P', 'mm', 'LETTER', true, 'UTF-8', false);
+            // Anonymous subclass de TCPDF para neutralizar las 3 vías por las que
+            // TCPDF inserta su atribución:
+            //  1. Header()/Footer() default (overrides no-op).
+            //  2. /Producer del Info dict (override _putinfo()).
+            //  3. tcpdflink: TCPDF::Close() dibuja "Powered by TCPDF (www.tcpdf.org)"
+            //     en la última página cuando esta flag protected es true. Setter
+            //     custom porque no expone uno público.
+            $pdf = new class('P', 'mm', 'LETTER', true, 'UTF-8', false) extends TCPDF {
+                public function Header() {}
+                public function Footer() {}
+                public function disableTCPDFLink() {
+                    $this->tcpdflink = false;
+                }
+
+                protected function _putinfo() {
+                    $oid = $this->_newobj();
+                    $out = '<<';
+                    $prev_isunicode = $this->isunicode;
+                    if ($this->docinfounicode) {
+                        $this->isunicode = true;
+                    }
+                    if (!TCPDF_STATIC::empty_string($this->title)) {
+                        $out .= ' /Title ' . $this->_textstring($this->title, $oid);
+                    }
+                    if (!TCPDF_STATIC::empty_string($this->author)) {
+                        $out .= ' /Author ' . $this->_textstring($this->author, $oid);
+                    }
+                    if (!TCPDF_STATIC::empty_string($this->subject)) {
+                        $out .= ' /Subject ' . $this->_textstring($this->subject, $oid);
+                    }
+                    if (!TCPDF_STATIC::empty_string($this->keywords)) {
+                        $out .= ' /Keywords ' . $this->_textstring($this->keywords, $oid);
+                    }
+                    if (!TCPDF_STATIC::empty_string($this->creator)) {
+                        $out .= ' /Creator ' . $this->_textstring($this->creator, $oid);
+                    }
+                    $this->isunicode = $prev_isunicode;
+                    // Custom Producer (replaces "TCPDF X.Y.Z (http://www.tcpdf.org)").
+                    $out .= ' /Producer ' . $this->_textstring('FE WooCommerce', $oid);
+                    $out .= ' /CreationDate ' . $this->_datestring(0, $this->doc_creation_timestamp);
+                    $out .= ' /ModDate ' . $this->_datestring(0, $this->doc_modification_timestamp);
+                    $out .= ' /Trapped /False';
+                    $out .= ' >>';
+                    $out .= "\n" . 'endobj';
+                    $this->_out($out);
+                    return $oid;
+                }
+            };
 
             // Set document information
             $document_labels = [
@@ -68,13 +114,20 @@ class FE_Woo_PDF_Generator {
             $pdf->SetTitle($document_label . ' #' . $order->get_order_number());
             $pdf->SetSubject($document_label);
 
-            // Remove default header/footer
+            // Suppress TCPDF "Powered by" link (drawn by Close() on the last page).
+            $pdf->disableTCPDFLink();
+
+            // Remove default header/footer + force empty footer string defensivamente.
             $pdf->setPrintHeader(false);
             $pdf->setPrintFooter(false);
+            $pdf->setHeaderData('', 0, '', '');
+            $pdf->setFooterData(array(0, 0, 0), array(0, 0, 0));
+            $pdf->setHeaderMargin(0);
+            $pdf->setFooterMargin(0);
 
-            // Set margins
-            $pdf->SetMargins(15, 15, 15);
-            $pdf->SetAutoPageBreak(true, 15);
+            // Tighten page margins for letter portrait (5 secciones + tabla + totales caben en 1 página).
+            $pdf->SetMargins(12, 12, 12);
+            $pdf->SetAutoPageBreak(true, 10);
 
             // Add a page
             $pdf->AddPage();
@@ -82,14 +135,32 @@ class FE_Woo_PDF_Generator {
             // Set font — dejavusans supports full UTF-8 (including ₡ U+20A1)
             $pdf->SetFont('dejavusans', '', 10);
 
-            // Generate HTML content
-            $html = self::generate_html_content($order, $clave, $document_type, $line_items, $emisor_data, $apply_exoneracion);
+            // Generate HTML content with styles
+            $html = '<style>' . self::get_pdf_styles() . '</style>' . self::generate_html_content($order, $clave, $document_type, $line_items, $emisor_data, $apply_exoneracion);
 
             // Output HTML content
             $pdf->writeHTML($html, true, false, true, false, '');
 
             // Get PDF content
             $pdf_content = $pdf->Output('', 'S');
+
+            // El método _putinfo override ya cambió /Producer en el Info dict.
+            // El XMP metadata (otra parte del PDF) sigue con el Producer hardcoded
+            // de TCPDF (6.11.3 (http://www.tcpdf.org) — 35 chars). El XMP es un
+            // stream con /Length fija, así que reemplazamos preservando longitud.
+            if (class_exists('TCPDF_STATIC')) {
+                $tcpdf_producer = TCPDF_STATIC::getTCPDFProducer();
+                $producer_len   = strlen($tcpdf_producer);
+                $custom         = 'FE WooCommerce';
+                $padded         = $custom . str_repeat(' ', max(0, $producer_len - strlen($custom)));
+                if (strlen($padded) === $producer_len) {
+                    $pdf_content = str_replace(
+                        '<pdf:Producer>' . $tcpdf_producer . '</pdf:Producer>',
+                        '<pdf:Producer>' . $padded . '</pdf:Producer>',
+                        $pdf_content
+                    );
+                }
+            }
 
             return [
                 'success' => true,
@@ -208,11 +279,38 @@ class FE_Woo_PDF_Generator {
         // Determine which items to use
         $items_to_display = $line_items !== null ? $line_items : $order->get_items();
 
-        // Get emisor info - use provided emisor_data or default config
+        // Get emisor info - use provided emisor_data, or fall back to parent emisor
+        // (mirroring XML resolution in build_emisor), or finally to wp_options.
+        if (!$emisor_data && class_exists('FE_Woo_Emisor_Manager')) {
+            $parent_emisor = FE_Woo_Emisor_Manager::get_parent_emisor();
+            if ($parent_emisor) {
+                $emisor_data = FE_Woo_Factura_Generator::prepare_emisor_data($parent_emisor);
+            }
+        }
+
+        // Resolve exoneration data up front: needed by the detail table (Tarifa column)
+        // and by the totals section.
+        $exon_data = null;
+        if ($apply_exoneracion && class_exists('FE_Woo_Exoneracion')) {
+            $exon_data = FE_Woo_Exoneracion::get_exoneracion_data($order->get_id());
+            if ($exon_data) {
+                $exon_validation = FE_Woo_Exoneracion::validate_exoneracion($order->get_id());
+                if (!$exon_validation['valid']) {
+                    $exon_data = null;
+                }
+            }
+        }
+
         $company_name = FE_Woo_Hacienda_Config::get_company_name();
         $cedula = FE_Woo_Hacienda_Config::get_cedula_juridica();
         $phone = FE_Woo_Hacienda_Config::get_phone();
         $email = FE_Woo_Hacienda_Config::get_email();
+
+        $loc_codes = FE_Woo_Hacienda_Config::get_location_codes();
+        $emisor_provincia_code = $loc_codes['province'] ?? '';
+        $emisor_canton_code    = $loc_codes['canton'] ?? '';
+        $emisor_distrito_code  = $loc_codes['district'] ?? '';
+        $emisor_otras_senas    = FE_Woo_Hacienda_Config::get_address();
 
         if ($emisor_data) {
             $company_name = $emisor_data['nombre_legal'] ?? $company_name;
@@ -221,17 +319,52 @@ class FE_Woo_PDF_Generator {
             $cedula = $emisor_data['cedula_juridica'] ?? $emisor_data['cedula'] ?? $cedula;
             $phone = $emisor_data['telefono'] ?? $phone;
             $email = $emisor_data['email'] ?? $email;
+            $emisor_provincia_code = $emisor_data['codigo_provincia'] ?? $emisor_provincia_code;
+            $emisor_canton_code    = $emisor_data['codigo_canton'] ?? $emisor_canton_code;
+            $emisor_distrito_code  = $emisor_data['codigo_distrito'] ?? $emisor_distrito_code;
+            $emisor_otras_senas    = $emisor_data['direccion'] ?? $emisor_otras_senas;
         }
+
+        // Build full address: provincia + cantón + distrito + otras señas.
+        $address_parts = [];
+        if ($emisor_provincia_code && class_exists('FE_Woo_CR_Locations')) {
+            $prov_name = FE_Woo_CR_Locations::get_provincia_name($emisor_provincia_code);
+            if ($prov_name) {
+                $address_parts[] = $prov_name;
+            }
+            if ($emisor_canton_code) {
+                $canton_name = FE_Woo_CR_Locations::get_canton_name($emisor_provincia_code, $emisor_canton_code);
+                if ($canton_name) {
+                    $address_parts[] = $canton_name;
+                }
+                if ($emisor_distrito_code) {
+                    $distrito_name = FE_Woo_CR_Locations::get_distrito_name($emisor_provincia_code, $emisor_canton_code, $emisor_distrito_code);
+                    if ($distrito_name) {
+                        $address_parts[] = $distrito_name;
+                    }
+                }
+            }
+        }
+        if ($emisor_otras_senas) {
+            $address_parts[] = $emisor_otras_senas;
+        }
+        $emisor_full_address = implode(', ', array_filter($address_parts));
 
         $logo_src = self::get_logo_src();
 
         ob_start();
+        ?>
+        <?php
+        $nombre_comercial = ($emisor_data && !empty($emisor_data['nombre_comercial'])) ? $emisor_data['nombre_comercial'] : '';
         ?>
         <div class="header">
             <?php if ($logo_src) : ?>
                 <div class="logo"><img src="<?php echo esc_attr($logo_src); ?>" alt="" height="60" /></div>
             <?php endif; ?>
             <div class="company-name"><?php echo esc_html($company_name); ?></div>
+            <?php if ($nombre_comercial && $nombre_comercial !== $company_name) : ?>
+                <div class="company-trade-name"><?php echo esc_html($nombre_comercial); ?></div>
+            <?php endif; ?>
             <div>Cédula Jurídica: <?php echo esc_html($cedula); ?></div>
             <?php if ($phone) : ?>
                 <div>Teléfono: <?php echo esc_html($phone); ?></div>
@@ -239,12 +372,22 @@ class FE_Woo_PDF_Generator {
             <?php if ($email) : ?>
                 <div>Email: <?php echo esc_html($email); ?></div>
             <?php endif; ?>
+            <?php if ($emisor_full_address) : ?>
+                <div>Dirección: <?php echo esc_html($emisor_full_address); ?></div>
+            <?php endif; ?>
+            <div>Moneda: <?php echo esc_html($order->get_currency()); ?></div>
         </div>
 
+        <?php
+        // Consecutivo formal Hacienda = posiciones 22-41 de la clave (20 chars).
+        $consecutivo = (strlen($clave) >= 41) ? substr($clave, 21, 20) : '';
+        ?>
         <div class="section">
             <div class="section-title"><?php echo esc_html($document_label); ?></div>
-            <div><strong>Número de Orden:</strong> <?php echo esc_html($order->get_order_number()); ?></div>
-            <div><strong>Fecha:</strong> <?php echo esc_html($order->get_date_created()->date_i18n('d/m/Y H:i')); ?></div>
+            <?php if ($consecutivo) : ?>
+                <div><strong>Consecutivo:</strong> <span class="clave"><?php echo esc_html($consecutivo); ?></span></div>
+            <?php endif; ?>
+            <div><strong>Fecha:</strong> <?php echo esc_html($order->get_date_created()->date_i18n('d/m/Y H:i')); ?> · <strong>Orden:</strong> <?php echo esc_html($order->get_order_number()); ?></div>
             <div><strong>Clave:</strong> <span class="clave"><?php echo esc_html($clave); ?></span></div>
         </div>
 
@@ -302,7 +445,9 @@ class FE_Woo_PDF_Generator {
                         <th>Descripción</th>
                         <th>CABYS</th>
                         <th style="text-align: center;">Cantidad</th>
+                        <th style="text-align: center;">Unidad</th>
                         <th style="text-align: right;">Precio Unit.</th>
+                        <th style="text-align: center;">Tarifa</th>
                         <th style="text-align: right;">Total</th>
                     </tr>
                 </thead>
@@ -310,19 +455,19 @@ class FE_Woo_PDF_Generator {
                     <?php foreach ($items_to_display as $item) : ?>
                         <?php
                         $product = $item->get_product();
-                        $cabys_code = '';
-                        if ($product && class_exists('FE_Woo_Tax_CABYS')) {
-                            $cabys_data = FE_Woo_Tax_CABYS::get_product_cabys($product);
-                            if ($cabys_data && isset($cabys_data['codigo'])) {
-                                $cabys_code = $cabys_data['codigo'];
-                            }
-                        }
+                        $cabys_code = $product ? FE_Woo_Product_CABYS::get_product_cabys_code($product) : '';
+                        $unidad = ($product && class_exists('FE_Woo_Product_Unidad_Medida'))
+                            ? FE_Woo_Product_Unidad_Medida::get_for_product($product)
+                            : 'Unid';
+                        $tarifa_label = self::get_tarifa_display($product, $item, $exon_data);
                         ?>
                         <tr>
                             <td><?php echo esc_html($item->get_name()); ?></td>
                             <td style="font-size: 9px;"><?php echo esc_html($cabys_code); ?></td>
                             <td style="text-align: center;"><?php echo esc_html($item->get_quantity()); ?></td>
+                            <td style="text-align: center;"><?php echo esc_html($unidad); ?></td>
                             <td style="text-align: right;"><?php echo wc_price($item->get_subtotal() / $item->get_quantity()); ?></td>
+                            <td style="text-align: center;"><?php echo esc_html($tarifa_label); ?></td>
                             <td style="text-align: right;"><?php echo wc_price($item->get_total()); ?></td>
                         </tr>
                     <?php endforeach; ?>
@@ -330,12 +475,15 @@ class FE_Woo_PDF_Generator {
                     <?php
                     // Only show shipping for full orders (not partial multi-factura)
                     if ($line_items === null && $order->get_shipping_total() > 0) :
+                        $shipping_tarifa = ($order->get_shipping_tax() > 0) ? '13%G' : '0%E';
                     ?>
                         <tr>
                             <td>Envío</td>
                             <td></td>
                             <td style="text-align: center;">1</td>
+                            <td style="text-align: center;">Sp</td>
                             <td style="text-align: right;"><?php echo wc_price($order->get_shipping_total()); ?></td>
+                            <td style="text-align: center;"><?php echo esc_html($shipping_tarifa); ?></td>
                             <td style="text-align: right;"><?php echo wc_price($order->get_shipping_total()); ?></td>
                         </tr>
                     <?php endif; ?>
@@ -344,17 +492,7 @@ class FE_Woo_PDF_Generator {
         </div>
 
         <?php
-        // Check for exemption data (only for parent/default emisor)
-        $exon_data = null;
-        if ($apply_exoneracion && class_exists('FE_Woo_Exoneracion')) {
-            $exon_data = FE_Woo_Exoneracion::get_exoneracion_data($order->get_id());
-            if ($exon_data) {
-                $exon_validation = FE_Woo_Exoneracion::validate_exoneracion($order->get_id());
-                if (!$exon_validation['valid']) {
-                    $exon_data = null;
-                }
-            }
-        }
+        // $exon_data ya resuelto arriba (antes de la tabla detalle).
 
         // Calculate totals per-item, respecting each product's tax status
         // This mirrors the XML generator logic in calculate_item_tax_info()
@@ -363,6 +501,7 @@ class FE_Woo_PDF_Generator {
         $total_display = 0;
         $discount = 0;
         $taxable_subtotal = 0; // Only subtotal of items that actually have tax
+        $exento_subtotal = 0;  // Items 'taxable' pero con 0% (Exento Hacienda)
         $has_mixed_rates = false;
 
         $items_for_totals = $line_items !== null ? $items_to_display : $order->get_items();
@@ -397,6 +536,9 @@ class FE_Woo_PDF_Generator {
                 $tax_display += $item_tax;
                 if ($item_has_tax) {
                     $taxable_subtotal += $item->get_total();
+                } else {
+                    // Item con tax_status='taxable' pero rate 0% → Exento Hacienda
+                    $exento_subtotal += $item->get_total();
                 }
             }
         }
@@ -427,10 +569,28 @@ class FE_Woo_PDF_Generator {
         if ($exon_data && isset($exon_data['porcentaje'])) {
             $tarifa_real = intval($exon_data['porcentaje']);
         }
+
+        // Exoneration amount = tax at 13% on taxable items minus actual tax applied (0 si no aplica).
+        $exon_monto = 0;
+        if ($exon_data && $taxable_subtotal > 0) {
+            $exon_monto = max(0, (($taxable_subtotal * 13) / 100) - $tax_display);
+        }
+        // IVA Devuelto: aplica solo a servicios turísticos. Por defecto 0.
+        $iva_devuelto = 0;
+
+        // Resolver medio de pago (PDF-3) y condición de venta (PDF-9): labels legibles Hacienda.
+        $payment_label = '';
+        $condicion_venta_label = '';
+        if (class_exists('FE_Woo_Factura_Generator')) {
+            list($pm_code, $pm_otros) = FE_Woo_Factura_Generator::get_payment_method($order);
+            $payment_label = FE_Woo_Factura_Generator::get_payment_method_label($pm_code, $pm_otros);
+            $cv_code = FE_Woo_Factura_Generator::get_sales_condition($order);
+            $condicion_venta_label = FE_Woo_Factura_Generator::get_sales_condition_label($cv_code);
+        }
         ?>
 
-        <div class="section">
-            <table>
+        <div class="section totales-section">
+            <table nobr="true">
                 <?php
                 // Use the per-item calculated subtotal (which already excludes tax_status='none' items)
                 $display_subtotal = $subtotal;
@@ -446,28 +606,46 @@ class FE_Woo_PDF_Generator {
                         <td style="text-align: right;">-<?php echo wc_price($display_discount); ?></td>
                     </tr>
                 <?php endif; ?>
+                <tr>
+                    <td style="text-align: right;"><strong>Exento:</strong></td>
+                    <td style="text-align: right;"><?php echo wc_price($exento_subtotal); ?></td>
+                </tr>
+                <tr>
+                    <td style="text-align: right;"><strong>Exonerado:</strong></td>
+                    <td style="text-align: right;"><?php echo wc_price($exon_monto); ?></td>
+                </tr>
                 <?php if ($tax_display > 0 || $tarifa_real === 0) : ?>
                     <tr>
                         <td style="text-align: right;"><strong>IVA (<?php echo esc_html($tarifa_real); ?>%):</strong></td>
                         <td style="text-align: right;"><?php echo wc_price($tax_display); ?></td>
                     </tr>
                 <?php endif; ?>
-                <?php if ($exon_data && $taxable_subtotal > 0) : ?>
-                    <?php
-                    // Exoneration amount = tax at 13% on taxable items minus actual tax applied
-                    $exon_monto = (($taxable_subtotal * 13) / 100) - $tax_display;
-                    ?>
-                    <?php if ($exon_monto > 0) : ?>
+                <tr>
+                    <td style="text-align: right;"><strong>IVA Devuelto:</strong></td>
+                    <td style="text-align: right;"><?php echo wc_price($iva_devuelto); ?></td>
+                </tr>
+                <?php if ($exon_data && $exon_monto > 0) : ?>
                     <tr>
                         <td style="text-align: right; color: #27ae60;"><strong>Exoneración aplicada:</strong></td>
                         <td style="text-align: right; color: #27ae60;">-<?php echo wc_price($exon_monto); ?></td>
                     </tr>
-                    <?php endif; ?>
                 <?php endif; ?>
                 <tr class="total-row">
                     <td style="text-align: right;"><strong>TOTAL:</strong></td>
                     <td style="text-align: right;"><strong><?php echo wc_price($total_display); ?></strong></td>
                 </tr>
+                <?php if ($condicion_venta_label) : ?>
+                    <tr>
+                        <td style="text-align: right;"><strong>Condición de Venta:</strong></td>
+                        <td style="text-align: right;"><?php echo esc_html($condicion_venta_label); ?></td>
+                    </tr>
+                <?php endif; ?>
+                <?php if ($payment_label) : ?>
+                    <tr>
+                        <td style="text-align: right;"><strong>Medio de Pago:</strong></td>
+                        <td style="text-align: right;"><?php echo esc_html($payment_label); ?></td>
+                    </tr>
+                <?php endif; ?>
             </table>
         </div>
 
@@ -489,10 +667,41 @@ class FE_Woo_PDF_Generator {
 
         <div class="footer">
             <p>Este documento es una representación impresa de la <?php echo esc_html($document_label); ?> autorizada por el Ministerio de Hacienda de Costa Rica.</p>
+            <p>Autorización mediante Resolución No.MH-DGT-RES-0027-2024 del 19/11/2024 de la DGTD V.4.4</p>
             <p>Generado el <?php echo esc_html(current_time('d/m/Y H:i')); ?></p>
         </div>
         <?php
         return ob_get_clean();
+    }
+
+    /**
+     * Build the per-line "Tarifa" string for the PDF detail table.
+     *
+     * Hacienda terminology:
+     *   G = Gravado (taxable, tarifa > 0, sin exoneración)
+     *   X = Exonerado (taxable + exoneración aplicada — la tarifa es la del exon)
+     *   E = Exento (taxable status pero tarifa 0%)
+     *   — = Sin estado de impuesto
+     *
+     * @param WC_Product|null $product
+     * @param WC_Order_Item   $item
+     * @param array|null      $exon_data
+     * @return string
+     */
+    private static function get_tarifa_display($product, $item, $exon_data) {
+        if (!$product || $product->get_tax_status() === 'none') {
+            return '—';
+        }
+        $item_tax = method_exists($item, 'get_total_tax') ? (float) $item->get_total_tax() : 0;
+        if ($exon_data && isset($exon_data['porcentaje']) && $item_tax > 0) {
+            $tarifa = (int) $exon_data['porcentaje'];
+            return $tarifa . '%X';
+        }
+        if ($item_tax > 0 && method_exists($item, 'get_total') && $item->get_total() > 0) {
+            $tarifa = round(($item_tax / (float) $item->get_total()) * 100);
+            return $tarifa . '%G';
+        }
+        return '0%E';
     }
 
     /**
@@ -518,18 +727,19 @@ class FE_Woo_PDF_Generator {
      */
     private static function get_pdf_styles() {
         return '
-            body { font-family: Arial, sans-serif; font-size: 12px; line-height: 1.4; margin: 0; }
-            .header { text-align: center; margin-bottom: 20px; border-bottom: 2px solid #333; padding-bottom: 10px; }
-            .company-name { font-size: 18px; font-weight: bold; }
-            .section { margin-bottom: 15px; }
-            .section-title { font-weight: bold; font-size: 14px; margin-bottom: 5px; color: #333; }
-            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-            th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
-            th { background-color: #f5f5f5; font-weight: bold; }
-            .total-row { font-weight: bold; background-color: #f9f9f9; }
-            .footer { margin-top: 30px; padding-top: 10px; border-top: 1px solid #333; font-size: 10px; text-align: center; }
-            .clave { font-size: 9px; word-break: break-all; font-family: monospace; }
-            .logo img { max-height: 70px; max-width: 220px; margin-bottom: 8px; }
+            body { font-family: Arial, sans-serif; font-size: 11px; line-height: 1.35; margin: 0; color: #333333; }
+            .header { text-align: left; margin-bottom: 14px; border-bottom: 2px solid #333333; padding-bottom: 8px; }
+            .company-name { font-size: 18px; font-weight: bold; color: #333333; margin-bottom: 2px; }
+            .company-trade-name { font-size: 13px; color: #666666; margin-bottom: 4px; font-style: italic; }
+            .section { margin-bottom: 10px; }
+            .section-title { font-weight: bold; font-size: 13px; margin-bottom: 6px; color: #333333; border-bottom: 1px solid #eaeaea; padding-bottom: 3px; text-transform: uppercase; }
+            table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+            th, td { padding: 5px 6px; text-align: left; border-bottom: 1px solid #eaeaea; }
+            th { background-color: #f5f5f5; color: #333333; font-weight: bold; font-size: 10px; text-transform: uppercase; }
+            .total-row td { font-weight: bold; background-color: #f5f5f5; border-top: 2px solid #333333; font-size: 12px; }
+            .footer { margin-top: 18px; padding-top: 8px; border-top: 1px solid #eaeaea; font-size: 9px; text-align: center; color: #777777; }
+            .clave { font-size: 9px; word-break: break-all; font-family: monospace; color: #555555; }
+            .logo img { max-height: 56px; max-width: 200px; margin-bottom: 8px; }
         ';
     }
 
@@ -582,17 +792,25 @@ class FE_Woo_PDF_Generator {
         // 3. Site icon (favicon)
         $add_candidate(get_site_icon_url());
 
-        foreach ($candidates as $candidate) {
-            // Skip SVGs - TCPDF needs raster images for the default image flow.
-            if (preg_match('/\.svg(\?|$)/i', $candidate)) {
-                continue;
-            }
+        // 4. Fallback: Search for an attachment titled 'logo' (common practice)
+        $logo_posts = get_posts([
+            'post_type'      => 'attachment',
+            'post_mime_type' => 'image',
+            'title'          => 'logo',
+            'posts_per_page' => 1,
+            'fields'         => 'ids',
+        ]);
+        if (!empty($logo_posts)) {
+            $add_candidate(get_attached_file($logo_posts[0]));
+        }
 
-            // Prefer filesystem paths. Return a file:// URI so DomPDF (the
-            // HTML-fallback engine) can load the image without enabling
-            // isRemoteEnabled/chroot — a bare absolute path silently fails
-            // there. TCPDF's writeHTML accepts file:// equally well.
-            if (file_exists($candidate)) {
+        foreach ($candidates as $candidate) {
+            $is_svg = preg_match('/\.svg(\?|$)/i', $candidate);
+            
+            // filesystem path check
+            if ($candidate && !filter_var($candidate, FILTER_VALIDATE_URL) && file_exists($candidate)) {
+                // Skip SVGs ONLY if we are strictly using TCPDF (not fallback)
+                // But generally, we want to return it and let the renderer decide.
                 $resolved = 'file://' . $candidate;
                 self::$logo_src_cache = $resolved;
                 return $resolved;
