@@ -862,6 +862,82 @@ async function findCompletedOrderWithGeneratedFactura(page) {
   throw new Error('Could not find a completed WooCommerce order with generated Factura Electronica data.');
 }
 
+// Prepara la clase de impuesto Costa Rica IVA y su rate 13% para que los productos FE usen una tarifa v4.4 válida.
+async function ensureCostaRicaIvaTaxRate(page) {
+  await gotoAdminPage(page, '/wp-admin/admin.php?page=wc-settings&tab=tax', /page=wc-settings&tab=tax/);
+
+  const taxClassesField = page.locator('#woocommerce_tax_classes, textarea[name="woocommerce_tax_classes"]').first();
+  await expect(taxClassesField).toBeVisible({ timeout: 15_000 });
+
+  const currentTaxClasses = await taxClassesField.inputValue();
+  if (!/Costa Rica IVA/i.test(currentTaxClasses)) {
+    const nextValue = currentTaxClasses.trim()
+      ? `${currentTaxClasses.trim()}\nCosta Rica IVA`
+      : 'Costa Rica IVA';
+    await taxClassesField.fill(nextValue);
+
+    const saveTaxClassesButton = page.getByRole('button', { name: /Save changes|Guardar cambios/i }).first();
+    await expect(saveTaxClassesButton).toBeVisible();
+    await Promise.all([
+      page.waitForLoadState('domcontentloaded'),
+      saveTaxClassesButton.click(),
+    ]);
+  }
+
+  const costaRicaRatesLink = page.getByRole('link', { name: /Costa Rica IVA rates/i }).first();
+  if (await costaRicaRatesLink.isVisible().catch(() => false)) {
+    await Promise.all([
+      page.waitForLoadState('domcontentloaded'),
+      costaRicaRatesLink.click(),
+    ]);
+  } else {
+    await gotoAdminPage(
+      page,
+      '/wp-admin/admin.php?page=wc-settings&tab=tax&section=costa-rica-iva',
+      /page=wc-settings&tab=tax&section=costa-rica-iva/
+    );
+  }
+
+  await expect(page.locator('table.wc_tax_rates')).toBeVisible({ timeout: 15_000 });
+
+  const existingRateRow = page.locator('table.wc_tax_rates tbody tr').filter({
+    hasText: /Costa Rica IVA/i,
+  }).filter({
+    has: page.locator('input[name^="tax_rate["], input.rate'),
+  }).first();
+
+  const existingRateText = (await existingRateRow.textContent().catch(() => '')) || '';
+  if (/13(?:\.0+)?/.test(existingRateText) && /Costa Rica IVA/i.test(existingRateText)) {
+    return;
+  }
+
+  const insertRowButton = page.getByRole('button', { name: /Insert row|Agregar fila/i }).first();
+  await expect(insertRowButton).toBeVisible({ timeout: 15_000 });
+  await insertRowButton.click();
+
+  const newRateRow = page.locator('table.wc_tax_rates tbody tr').last();
+  await expect(newRateRow).toBeVisible({ timeout: 15_000 });
+
+  const rateField = newRateRow.locator('input[name^="tax_rate["], input.rate').first();
+  const taxNameField = newRateRow.locator('input[name^="tax_rate_name"], input.name').first();
+  const codigoTarifaSelect = newRateRow.locator('select.fe-woo-codigo-tarifa-iva-select').first();
+
+  await expect(rateField).toBeVisible({ timeout: 15_000 });
+  await rateField.fill('13');
+  await taxNameField.fill('Costa Rica IVA');
+  await expect(codigoTarifaSelect).toBeVisible({ timeout: 15_000 });
+  await codigoTarifaSelect.selectOption({ label: /08\s*-\s*Tarifa General 13%/i });
+
+  const saveRatesButton = page.getByRole('button', { name: /Save changes|Guardar cambios/i }).first();
+  await expect(saveRatesButton).toBeVisible();
+  await Promise.all([
+    page.waitForLoadState('domcontentloaded'),
+    saveRatesButton.click(),
+  ]);
+
+  await expect(page.locator('table.wc_tax_rates tbody')).toContainText(/Costa Rica IVA/i);
+}
+
 // Confirma que el sitio base levanta y que WordPress responde con contenido visible.
 test('homepage responds and shows WordPress content', async ({ page }) => {
   await page.goto('/');
@@ -889,6 +965,18 @@ test('add factura electronica emisores from WooCommerce settings', async ({ page
   });
 
   expect(emitters.length).toBeGreaterThanOrEqual(3);
+});
+
+// Configura la clase y rate de impuesto que luego usan los productos FE dentro de WooCommerce.
+test('add Costa Rica IVA tax class and rate from WooCommerce settings', async ({ page }, testInfo) => {
+  await ensureCostaRicaIvaTaxRate(page);
+
+  const screenshotPath = testInfo.outputPath('costa-rica-iva-tax-rates-full-page.png');
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+  await testInfo.attach('costa-rica-iva-tax-rates-full-page', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
 });
 
 // Crea un lote de productos con precio y emisor FE aleatorio para poblar el catálogo del entorno de prueba.
