@@ -864,6 +864,21 @@ async function findCompletedOrderWithGeneratedFactura(page) {
 
 // Prepara la clase de impuesto Costa Rica IVA y su rate 13% para que los productos FE usen una tarifa v4.4 válida.
 async function ensureCostaRicaIvaTaxRate(page) {
+  await gotoAdminPage(page, '/wp-admin/admin.php?page=wc-settings&tab=general', /page=wc-settings(?:&tab=general)?/);
+
+  const enableTaxesCheckbox = page.locator('#woocommerce_calc_taxes').first();
+  if (await enableTaxesCheckbox.isVisible().catch(() => false)) {
+    if (!(await enableTaxesCheckbox.isChecked().catch(() => false))) {
+      await enableTaxesCheckbox.check();
+      const saveGeneralSettingsButton = page.getByRole('button', { name: /Save changes|Guardar cambios/i }).first();
+      await expect(saveGeneralSettingsButton).toBeVisible();
+      await Promise.all([
+        page.waitForLoadState('domcontentloaded'),
+        saveGeneralSettingsButton.click(),
+      ]);
+    }
+  }
+
   await gotoAdminPage(page, '/wp-admin/admin.php?page=wc-settings&tab=tax', /page=wc-settings&tab=tax/);
 
   const taxClassesField = page.locator('#woocommerce_tax_classes, textarea[name="woocommerce_tax_classes"]').first();
