@@ -977,10 +977,13 @@ async function ensureCostaRicaIvaTaxRate(page) {
     await expect
       .poll(async () => await editableRateInputs.count().catch(() => 0), { timeout: 20_000 })
       .toBeGreaterThan(previousEditableInputCount);
-
-    const refreshedMatch = await findMatchingOrEmptyRow();
-    editableRow = refreshedMatch?.row || taxRateRows.last();
   }
+
+  const editableRows = page.locator('table.wc_tax_rates tbody tr').filter({
+    has: page.locator('input[name^="tax_rate["], input.rate'),
+  });
+  await expect(editableRows.last()).toBeVisible({ timeout: 15_000 });
+  editableRow = editableRows.last();
 
   const rateField = editableRow.locator('input[name^="tax_rate["], input.rate').first();
   const taxNameField = editableRow.locator('input[name^="tax_rate_name"], input.name').first();
@@ -1036,7 +1039,7 @@ test('add factura electronica emisores from WooCommerce settings', async ({ page
 
 // Configura la clase y rate de impuesto que luego usan los productos FE dentro de WooCommerce.
 test('add Costa Rica IVA tax class and rate from WooCommerce settings', async ({ page }, testInfo) => {
-  test.setTimeout(120000);
+  test.setTimeout(60000);
   await ensureCostaRicaIvaTaxRate(page);
 
   const screenshotPath = testInfo.outputPath('costa-rica-iva-tax-rates-full-page.png');
