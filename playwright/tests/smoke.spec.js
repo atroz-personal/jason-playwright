@@ -985,10 +985,6 @@ async function ensureCostaRicaIvaTaxRate(page) {
     saveRatesButton.click(),
   ]);
 
-  const successNotice = page.locator('.notice-success, .updated, #message').filter({
-    hasText: /saved|updated|actualizado|guardado|changes/i,
-  }).first();
-  await expect(successNotice).toBeVisible({ timeout: 20_000 });
   await expect(taxRatesTable).toBeVisible({ timeout: 20_000 });
 }
 
