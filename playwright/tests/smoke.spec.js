@@ -970,11 +970,11 @@ async function ensureCostaRicaIvaTaxRate(page) {
       label: (option.textContent || '').trim(),
     }))
   );
-  const matchingCodigoTarifaOption = codigoTarifaOptions.find((option) =>
-    /08\s*-\s*Tarifa General 13%/i.test(option.label)
-  );
+  const matchingCodigoTarifaOption = codigoTarifaOptions.find((option) => option.value === '08')
+    || codigoTarifaOptions.find((option) => /^08\b/i.test(option.label))
+    || codigoTarifaOptions.find((option) => /08/i.test(option.label));
   if (!matchingCodigoTarifaOption) {
-    throw new Error('Could not find the "08 - Tarifa General 13%" IVA rate option.');
+    throw new Error(`Could not find the CodigoTarifaIVA option for code 08. Available options: ${codigoTarifaOptions.map((option) => `${option.value}:${option.label}`).join(' | ')}`);
   }
   await codigoTarifaSelect.selectOption(matchingCodigoTarifaOption.value);
 
