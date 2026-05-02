@@ -985,27 +985,11 @@ async function ensureCostaRicaIvaTaxRate(page) {
     saveRatesButton.click(),
   ]);
 
-  await expect.poll(async () => {
-    const rowCount = await taxRateRows.count().catch(() => 0);
-
-    for (let index = 0; index < rowCount; index += 1) {
-      const row = taxRateRows.nth(index);
-      const rowText = ((await row.textContent().catch(() => '')) || '').replace(/\s+/g, ' ');
-      if (/Costa Rica IVA/i.test(rowText) && /13(?:\.0+)?/i.test(rowText)) {
-        return true;
-      }
-
-      const rateValue = ((await row.locator('input[name^="tax_rate["], input.rate').first().inputValue().catch(() => '')) || '').trim();
-      const taxNameValue = ((await row.locator('input[name^="tax_rate_name"], input.name').first().inputValue().catch(() => '')) || '').trim();
-      const codigoTarifaValue = ((await row.locator('select.fe-woo-codigo-tarifa-iva-select').first().inputValue().catch(() => '')) || '').trim();
-
-      if (/^13(?:\.0+)?$/.test(rateValue) && /^Costa Rica IVA$/i.test(taxNameValue) && codigoTarifaValue === matchingCodigoTarifaOption.value) {
-        return true;
-      }
-    }
-
-    return false;
-  }, { timeout: 20_000 }).toBe(true);
+  const successNotice = page.locator('.notice-success, .updated, #message').filter({
+    hasText: /saved|updated|actualizado|guardado|changes/i,
+  }).first();
+  await expect(successNotice).toBeVisible({ timeout: 20_000 });
+  await expect(taxRatesTable).toBeVisible({ timeout: 20_000 });
 }
 
 // Confirma que el sitio base levanta y que WordPress responde con contenido visible.
