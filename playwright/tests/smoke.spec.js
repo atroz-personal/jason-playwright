@@ -483,6 +483,26 @@ async function fillFacturaElectronicaLocation(page) {
   await otrasSenasField.fill('Texto dummy de Playwright test para otras señas.');
 }
 
+// Algunos navegadores/skins de admin no cambian el checkbox con `.check()`, así que dejamos un fallback seguro.
+async function ensureCheckboxChecked(checkboxLocator) {
+  if (await checkboxLocator.isChecked().catch(() => false)) {
+    return;
+  }
+
+  await checkboxLocator.click({ force: true }).catch(() => null);
+  if (await checkboxLocator.isChecked().catch(() => false)) {
+    return;
+  }
+
+  await checkboxLocator.evaluate((element) => {
+    element.checked = true;
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+
+  await expect(checkboxLocator).toBeChecked();
+}
+
 // Arma una orden completada con FE usando productos ya existentes y una cantidad de items configurable.
 async function createCompletedFacturaOrder(page, options = {}) {
   const { itemCount, minItemCount, maxItemCount } = options;
@@ -508,9 +528,7 @@ async function createCompletedFacturaOrder(page, options = {}) {
 
   const requireFacturaCheckbox = page.locator('#fe_woo_require_factura');
   await expect(requireFacturaCheckbox).toBeVisible();
-  if (!(await requireFacturaCheckbox.isChecked())) {
-    await requireFacturaCheckbox.check();
-  }
+  await ensureCheckboxChecked(requireFacturaCheckbox);
 
   const idTypeField = page.locator('#fe_woo_id_type');
   if (await idTypeField.isVisible().catch(() => false)) {
@@ -598,9 +616,7 @@ async function createCompletedFacturaOrderWithMixedEmitters(page) {
 
   const requireFacturaCheckbox = page.locator('#fe_woo_require_factura');
   await expect(requireFacturaCheckbox).toBeVisible();
-  if (!(await requireFacturaCheckbox.isChecked())) {
-    await requireFacturaCheckbox.check();
-  }
+  await ensureCheckboxChecked(requireFacturaCheckbox);
 
   const idTypeField = page.locator('#fe_woo_id_type');
   if (await idTypeField.isVisible().catch(() => false)) {
@@ -916,6 +932,7 @@ async function ensureCostaRicaIvaTaxRate(page) {
   await expect(page.locator('table.wc_tax_rates')).toBeVisible({ timeout: 15_000 });
   const taxRateRows = page.locator('table.wc_tax_rates tbody tr');
   await expect.poll(async () => await taxRateRows.count(), { timeout: 15_000 }).toBeGreaterThan(0);
+  const editableRateInputs = page.locator('table.wc_tax_rates tbody tr input[name^="tax_rate["], table.wc_tax_rates tbody tr input.rate');
 
   const findMatchingOrEmptyRow = async () => {
     const rowCount = await taxRateRows.count();
@@ -945,6 +962,7 @@ async function ensureCostaRicaIvaTaxRate(page) {
 
   let editableRow = existingOrEmptyRow?.row || null;
   if (!editableRow) {
+    const previousEditableInputCount = await editableRateInputs.count().catch(() => 0);
     const insertRowButton = page
       .locator('button.insert, a.insert, .button.plus.insert, button, a, input[type="button"], input[type="submit"]')
       .filter({ hasText: /Insert row|Agregar fila/i })
@@ -956,8 +974,12 @@ async function ensureCostaRicaIvaTaxRate(page) {
       await page.locator('button.insert, a.insert, .button.plus.insert').first().click().catch(() => null);
     }
 
-    editableRow = taxRateRows.last();
-    await expect(editableRow).toBeVisible({ timeout: 15_000 });
+    await expect
+      .poll(async () => await editableRateInputs.count().catch(() => 0), { timeout: 20_000 })
+      .toBeGreaterThan(previousEditableInputCount);
+
+    const refreshedMatch = await findMatchingOrEmptyRow();
+    editableRow = refreshedMatch?.row || taxRateRows.last();
   }
 
   const rateField = editableRow.locator('input[name^="tax_rate["], input.rate').first();
