@@ -964,7 +964,19 @@ async function ensureCostaRicaIvaTaxRate(page) {
   await rateField.fill('13');
   await taxNameField.fill('Costa Rica IVA');
   await expect(codigoTarifaSelect).toBeVisible({ timeout: 15_000 });
-  await codigoTarifaSelect.selectOption({ label: /08\s*-\s*Tarifa General 13%/i });
+  const codigoTarifaOptions = await codigoTarifaSelect.locator('option').evaluateAll((options) =>
+    options.map((option) => ({
+      value: option.getAttribute('value') || '',
+      label: (option.textContent || '').trim(),
+    }))
+  );
+  const matchingCodigoTarifaOption = codigoTarifaOptions.find((option) =>
+    /08\s*-\s*Tarifa General 13%/i.test(option.label)
+  );
+  if (!matchingCodigoTarifaOption) {
+    throw new Error('Could not find the "08 - Tarifa General 13%" IVA rate option.');
+  }
+  await codigoTarifaSelect.selectOption(matchingCodigoTarifaOption.value);
 
   const saveRatesButton = page.getByRole('button', { name: /Save changes|Guardar cambios/i }).first();
   await expect(saveRatesButton).toBeVisible();
