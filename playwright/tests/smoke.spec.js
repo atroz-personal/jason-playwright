@@ -938,7 +938,6 @@ async function ensureCostaRicaIvaTaxRate(page) {
     return;
   }
 
-  const previousRowCount = await taxRateRows.count();
   const insertRowButton = page
     .locator('button.insert, a.insert, .button.plus.insert, button, a, input[type="button"], input[type="submit"]')
     .filter({ hasText: /Insert row|Agregar fila/i })
@@ -947,11 +946,15 @@ async function ensureCostaRicaIvaTaxRate(page) {
   await expect(insertRowButton).toBeVisible({ timeout: 15_000 });
   await insertRowButton.click();
 
+  const editableRateInputs = page.locator('table.wc_tax_rates tbody input[name^="tax_rate["], table.wc_tax_rates tbody input.rate');
   await expect
-    .poll(async () => await taxRateRows.count(), { timeout: 20_000 })
-    .toBeGreaterThan(previousRowCount);
+    .poll(async () => await editableRateInputs.count(), { timeout: 20_000 })
+    .toBeGreaterThan(0);
 
-  const editableRow = taxRateRows.last();
+  const editableRows = page.locator('table.wc_tax_rates tbody tr').filter({
+    has: page.locator('input[name^="tax_rate["], input.rate'),
+  });
+  const editableRow = editableRows.last();
 
   const rateField = editableRow.locator('input[name^="tax_rate["], input.rate').first();
   const taxNameField = editableRow.locator('input[name^="tax_rate_name"], input.name').first();
