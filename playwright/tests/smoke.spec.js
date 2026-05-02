@@ -914,31 +914,55 @@ async function ensureCostaRicaIvaTaxRate(page) {
   }
 
   await expect(page.locator('table.wc_tax_rates')).toBeVisible({ timeout: 15_000 });
+  const taxRateRows = page.locator('table.wc_tax_rates tbody tr');
+  await expect.poll(async () => await taxRateRows.count(), { timeout: 15_000 }).toBeGreaterThan(0);
 
-  const existingRateRow = page.locator('table.wc_tax_rates tbody tr').filter({
-    hasText: /Costa Rica IVA/i,
-  }).filter({
-    has: page.locator('input[name^="tax_rate["], input.rate'),
-  }).first();
+  const findMatchingOrEmptyRow = async () => {
+    const rowCount = await taxRateRows.count();
+    let emptyRow = null;
 
-  const existingRateText = (await existingRateRow.textContent().catch(() => '')) || '';
-  if (/13(?:\.0+)?/.test(existingRateText) && /Costa Rica IVA/i.test(existingRateText)) {
+    for (let index = 0; index < rowCount; index += 1) {
+      const row = taxRateRows.nth(index);
+      const rateValue = ((await row.locator('input[name^="tax_rate["], input.rate').first().inputValue().catch(() => '')) || '').trim();
+      const taxNameValue = ((await row.locator('input[name^="tax_rate_name"], input.name').first().inputValue().catch(() => '')) || '').trim();
+
+      if (/^13(?:\.0+)?$/.test(rateValue) && /^Costa Rica IVA$/i.test(taxNameValue)) {
+        return { row, isExisting: true };
+      }
+
+      if (!emptyRow && rateValue === '' && taxNameValue === '') {
+        emptyRow = row;
+      }
+    }
+
+    return emptyRow ? { row: emptyRow, isExisting: false } : null;
+  };
+
+  const existingOrEmptyRow = await findMatchingOrEmptyRow();
+  if (existingOrEmptyRow?.isExisting) {
     return;
   }
 
-  const insertRowButton = page
-    .locator('button, a, input[type="button"], input[type="submit"]')
-    .filter({ hasText: /Insert row|Agregar fila/i })
-    .first();
-  await expect(insertRowButton).toBeVisible({ timeout: 15_000 });
-  await insertRowButton.click();
+  let editableRow = existingOrEmptyRow?.row || null;
+  if (!editableRow) {
+    const insertRowButton = page
+      .locator('button.insert, a.insert, .button.plus.insert, button, a, input[type="button"], input[type="submit"]')
+      .filter({ hasText: /Insert row|Agregar fila/i })
+      .first();
 
-  const newRateRow = page.locator('table.wc_tax_rates tbody tr').last();
-  await expect(newRateRow).toBeVisible({ timeout: 15_000 });
+    if (await insertRowButton.isVisible().catch(() => false)) {
+      await insertRowButton.click();
+    } else {
+      await page.locator('button.insert, a.insert, .button.plus.insert').first().click().catch(() => null);
+    }
 
-  const rateField = newRateRow.locator('input[name^="tax_rate["], input.rate').first();
-  const taxNameField = newRateRow.locator('input[name^="tax_rate_name"], input.name').first();
-  const codigoTarifaSelect = newRateRow.locator('select.fe-woo-codigo-tarifa-iva-select').first();
+    editableRow = taxRateRows.last();
+    await expect(editableRow).toBeVisible({ timeout: 15_000 });
+  }
+
+  const rateField = editableRow.locator('input[name^="tax_rate["], input.rate').first();
+  const taxNameField = editableRow.locator('input[name^="tax_rate_name"], input.name').first();
+  const codigoTarifaSelect = editableRow.locator('select.fe-woo-codigo-tarifa-iva-select').first();
 
   await expect(rateField).toBeVisible({ timeout: 15_000 });
   await rateField.fill('13');
@@ -953,7 +977,10 @@ async function ensureCostaRicaIvaTaxRate(page) {
     saveRatesButton.click(),
   ]);
 
-  await expect(page.locator('table.wc_tax_rates tbody')).toContainText(/Costa Rica IVA/i);
+  await expect.poll(async () => {
+    const matchedRow = await findMatchingOrEmptyRow();
+    return Boolean(matchedRow?.isExisting);
+  }, { timeout: 20_000 }).toBe(true);
 }
 
 // Confirma que el sitio base levanta y que WordPress responde con contenido visible.
