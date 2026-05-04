@@ -431,6 +431,8 @@ async function addExistingProductToOrder(page, productName, quantity) {
 async function recalculateOrderTotals(page) {
   const orderItemsBox = page.locator('#woocommerce-order-items');
   await expect(orderItemsBox).toBeVisible({ timeout: 15_000 });
+  const orderItemsOverlay = orderItemsBox.locator('.blockUI.blockOverlay');
+  await expect(orderItemsOverlay).toHaveCount(0, { timeout: 20_000 });
 
   const recalculateButton = orderItemsBox
     .locator('button, a, input[type="button"], input[type="submit"]')
@@ -444,6 +446,7 @@ async function recalculateOrderTotals(page) {
   const dialog = await dialogPromise;
   await dialog.accept();
 
+  await expect(orderItemsOverlay).toHaveCount(0, { timeout: 20_000 });
   await page.waitForLoadState('networkidle');
   await expect(orderItemsBox).toBeVisible({ timeout: 15_000 });
 }
