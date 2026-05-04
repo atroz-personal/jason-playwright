@@ -276,7 +276,7 @@ async function getExistingProductNames(page) {
   return productNames;
 }
 
-// Crea un producto nuevo y lo deja amarrado a un emisor FE específico desde la pantalla de edición.
+// Crea un producto nuevo con emisor FE, tax class Costa Rica IVA y CABYS válido para que luego pueda facturarse.
 async function createProductWithFacturaEmitter(page, { productName, regularPrice, emitterId, description }) {
   await gotoAdminPage(page, '/wp-admin/post-new.php?post_type=product', /post-new\.php\?post_type=product/);
   await expect(page.locator('body')).toContainText(/Add new product|Create product|New product|Edit product/i);
@@ -476,7 +476,7 @@ async function addExistingProductToOrder(page, productName, quantity) {
   return addedProductName;
 }
 
-// Fuerza el recálculo de la orden para que WooCommerce agregue impuestos y confirma el prompt nativo.
+// Recalcula la orden con el prompt nativo de WooCommerce para que se apliquen impuestos antes de completarla.
 async function recalculateOrderTotals(page) {
   const orderItemsBox = page.locator('#woocommerce-order-items');
   await expect(orderItemsBox).toBeVisible({ timeout: 15_000 });
@@ -576,7 +576,7 @@ async function ensureCheckboxChecked(checkboxLocator) {
   await expect(checkboxLocator).toBeChecked();
 }
 
-// Arma una orden completada con FE usando productos ya existentes y una cantidad de items configurable.
+// Arma una orden FE arrancando en pending, recalcula impuestos y recién al final la deja en completed.
 async function createCompletedFacturaOrder(page, options = {}) {
   const { itemCount, minItemCount, maxItemCount } = options;
   await ensureDefaultFacturaElectronicaEmisor(page);
@@ -658,7 +658,7 @@ async function createCompletedFacturaOrder(page, options = {}) {
   return { productNames: addedProducts.map((product) => product.name) };
 }
 
-// Este flujo fuerza una orden con mezcla real de emisor default y no-default para cubrir la multi-factura.
+// Este flujo arma una orden mixta con emisores distintos para cubrir el caso de multi-factura del plugin.
 async function createCompletedFacturaOrderWithMixedEmitters(page) {
   const emitters = await ensureMinimumFacturaElectronicaEmitters(page, 2);
   const defaultEmitter = emitters.find((emitter) => emitter.isDefault);
@@ -971,7 +971,7 @@ async function findCompletedOrderWithGeneratedFactura(page) {
   throw new Error('Could not find a completed WooCommerce order with generated Factura Electronica data.');
 }
 
-// Prepara la clase de impuesto Costa Rica IVA y su rate 13% para que los productos FE usen una tarifa v4.4 válida.
+// Deja creada la clase Costa Rica IVA y su rate 13% para que los productos smoke tributen con la tarifa esperada.
 async function ensureCostaRicaIvaTaxRate(page) {
   await gotoAdminPage(page, '/wp-admin/admin.php?page=wc-settings&tab=general', /page=wc-settings(?:&tab=general)?/);
 
@@ -1110,7 +1110,7 @@ test('add factura electronica emisores from WooCommerce settings', async ({ page
   expect(emitters.length).toBeGreaterThanOrEqual(3);
 });
 
-// Configura la clase y rate de impuesto que luego usan los productos FE dentro de WooCommerce.
+// Deja lista la clase Costa Rica IVA en WooCommerce con evidencia visual para el resto del flujo FE.
 test('add Costa Rica IVA tax class and rate from WooCommerce settings', async ({ page }, testInfo) => {
   test.setTimeout(60000);
   await ensureCostaRicaIvaTaxRate(page);
@@ -1123,7 +1123,7 @@ test('add Costa Rica IVA tax class and rate from WooCommerce settings', async ({
   });
 });
 
-// Crea un lote de productos con precio y emisor FE aleatorio para poblar el catálogo del entorno de prueba.
+// Crea varios productos smoke con emisor, tax class Costa Rica IVA y CABYS para poblar el catálogo del entorno.
 test('add product from wp-admin', async ({ page }, testInfo) => {
   test.setTimeout(90000);
 
@@ -1154,7 +1154,7 @@ test('add product from wp-admin', async ({ page }, testInfo) => {
   });
 });
 
-// Arma una orden completada con FE usando productos existentes para validar el flujo base de creación.
+// Valida el alta de una orden FE completa, incluyendo recálculo de impuestos antes de cerrarla en completed.
 test('add completed order with factura electronica from wp-admin', async ({ page }, testInfo) => {
   await createCompletedFacturaOrder(page);
 
@@ -1166,7 +1166,7 @@ test('add completed order with factura electronica from wp-admin', async ({ page
   });
 });
 
-// Ejecuta FE sobre una orden normal y deja evidencia del estado que reporta el metabox en la orden.
+// Ejecuta FE sobre una orden simple y deja evidencia del estado final o en cola que reporta el metabox.
 test('execute factura electronica from order status box', async ({ page }, testInfo) => {
   test.setTimeout(120000);
 
@@ -1190,7 +1190,7 @@ test('execute factura electronica from order status box', async ({ page }, testI
   });
 });
 
-// Fuerza una orden con productos ligados a emisor default y no-default para revisar el comportamiento mixto.
+// Fuerza una orden con emisores mezclados para revisar el comportamiento multi-factura del metabox FE.
 test('execute factura electronica with default and non-default emitters', async ({ page }, testInfo) => {
   test.setTimeout(120000);
 
@@ -1250,7 +1250,7 @@ test('cancel a completed order with generated factura electronica', async ({ pag
   });
 });
 
-// Toma una orden cancelada con FE generada y dispara una nota de crédito manual desde el metabox de facturas.
+// Toma una orden cancelada con FE generada y prueba la creación manual de notas de crédito con códigos válidos.
 test('generate credit note for cancelled order with generated factura electronica', async ({ page }, testInfo) => {
   test.setTimeout(120000);
   const creditNoteReason = 'Generación de NC por pruebas smoke';
