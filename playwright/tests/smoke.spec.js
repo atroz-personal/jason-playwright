@@ -316,6 +316,40 @@ async function createProductWithFacturaEmitter(page, { productName, regularPrice
     await expect(taxClassField).toHaveValue(costaRicaIvaOption);
   }
 
+  const cabysSearchField = page.locator('#fe_woo_cabys_search').first();
+  const cabysCodeField = page.locator('#fe_woo_cabys_code').first();
+  const cabysDescriptionField = page.locator('#fe_woo_cabys_description').first();
+  const cabysResults = page.locator('#fe-woo-cabys-results').first();
+  const cabysSpinner = page.locator('.fe-woo-cabys-spinner').first();
+
+  if (await cabysSearchField.isVisible().catch(() => false)) {
+    const cabysTerms = ['venta', 'servicios'];
+    let cabysSelected = false;
+
+    for (const cabysTerm of cabysTerms) {
+      await cabysSearchField.fill('');
+      await cabysSearchField.fill(cabysTerm);
+
+      await expect(cabysSpinner).toHaveClass(/is-active/, { timeout: 10_000 }).catch(() => null);
+      await expect(cabysSpinner).not.toHaveClass(/is-active/, { timeout: 25_000 }).catch(() => null);
+
+      const cabysResult = cabysResults.locator('.fe-woo-cabys-result').first();
+      if (!(await cabysResult.isVisible().catch(() => false))) {
+        continue;
+      }
+
+      await cabysResult.click();
+      await expect(cabysCodeField).toHaveValue(/^\d{13}$/, { timeout: 15_000 });
+      await expect(cabysDescriptionField).not.toHaveValue('', { timeout: 15_000 });
+      cabysSelected = true;
+      break;
+    }
+
+    if (!cabysSelected) {
+      throw new Error('Could not find a valid CABYS result using the smoke search terms "venta" or "servicios".');
+    }
+  }
+
   const productEmitterField = page.locator('#fe_woo_emisor_id').first();
   await expect(productEmitterField).toBeVisible({ timeout: 15_000 });
   await expect
