@@ -60,6 +60,10 @@ jobs:
         run: |
           echo "$FE_CERTIFICATE_P12_B64" | base64 --decode > /tmp/fe-certificate.p12
 
+      - name: Configure WooCommerce currency to CRC
+        run: |
+          docker exec wp-app wp option update woocommerce_currency CRC --allow-root --path=/var/www/html
+
       - name: Install FE plugin
         run: |
           docker cp plugins/plugin-factura-electronica/. wp-app:/var/www/html/wp-content/plugins/plugin-factura-electronica/
