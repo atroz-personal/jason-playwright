@@ -1300,7 +1300,13 @@ test('generate credit note for cancelled order with generated factura electronic
     const availableReferenceCodes = await referenceCodeSelect.locator('option').evaluateAll((options) =>
       options.map((option) => option.value).filter(Boolean)
     );
-    const randomReferenceCode = availableReferenceCodes[Math.floor(Math.random() * availableReferenceCodes.length)];
+    const validCreditNoteReferenceCodes = availableReferenceCodes.filter((code) =>
+      ['01', '02', '04', '05', '06', '07', '08', '09', '10', '11', '12', '99'].includes(code)
+    );
+    if (validCreditNoteReferenceCodes.length === 0) {
+      throw new Error(`Could not find a valid reference code for credit notes. Available codes: ${availableReferenceCodes.join(', ')}`);
+    }
+    const randomReferenceCode = validCreditNoteReferenceCodes[Math.floor(Math.random() * validCreditNoteReferenceCodes.length)];
 
     await notaContainer.locator('.fe-woo-note-type').first().selectOption('nota_credito');
     await referenceCodeSelect.selectOption(randomReferenceCode);
