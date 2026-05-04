@@ -439,12 +439,12 @@ async function recalculateOrderTotals(page) {
     .filter({ hasText: /Recalculate|Recalcular/i })
     .first();
   await expect(recalculateButton).toBeVisible({ timeout: 15_000 });
+  await recalculateButton.scrollIntoViewIfNeeded();
 
-  const dialogPromise = page.waitForEvent('dialog', { timeout: 15_000 });
-  await recalculateButton.click();
-
-  const dialog = await dialogPromise;
-  await dialog.accept();
+  await Promise.all([
+    page.waitForEvent('dialog', { timeout: 15_000 }).then((dialog) => dialog.accept()),
+    recalculateButton.click({ timeout: 15_000 }),
+  ]);
 
   await expect(orderItemsOverlay).toHaveCount(0, { timeout: 20_000 });
   await page.waitForLoadState('networkidle');
@@ -547,8 +547,8 @@ async function createCompletedFacturaOrder(page, options = {}) {
   await expect(page.locator('#order_status')).toBeVisible();
   await expect(page.locator('body')).toContainText(/Add new order|Order actions|Order data|Nueva orden/i);
 
-  await page.locator('#order_status').selectOption('wc-completed');
-  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
+  await page.locator('#order_status').selectOption('wc-pending');
+  await expect(page.locator('#order_status')).toHaveValue('wc-pending');
 
   const requireFacturaCheckbox = page.locator('#fe_woo_require_factura');
   await expect(requireFacturaCheckbox).toBeVisible();
@@ -592,6 +592,14 @@ async function createCompletedFacturaOrder(page, options = {}) {
   ]);
 
   await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+/, { timeout: 20_000 });
+  await page.locator('#order_status').selectOption('wc-completed');
+  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
+  const updateOrderButton = page.getByRole('button', { name: /^Update$/i }).first();
+  await expect(updateOrderButton).toBeVisible();
+  await Promise.all([
+    page.waitForLoadState('domcontentloaded'),
+    updateOrderButton.click(),
+  ]);
   await expect(page.locator('#order_status')).toHaveValue('wc-completed');
   await expect(page.locator('#fe_woo_require_factura')).toBeChecked();
   for (const addedProduct of addedProducts) {
@@ -637,8 +645,8 @@ async function createCompletedFacturaOrderWithMixedEmitters(page) {
   await expect(page.locator('#order_status')).toBeVisible();
   await expect(page.locator('body')).toContainText(/Add new order|Order actions|Order data|Nueva orden/i);
 
-  await page.locator('#order_status').selectOption('wc-completed');
-  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
+  await page.locator('#order_status').selectOption('wc-pending');
+  await expect(page.locator('#order_status')).toHaveValue('wc-pending');
 
   const requireFacturaCheckbox = page.locator('#fe_woo_require_factura');
   await expect(requireFacturaCheckbox).toBeVisible();
@@ -682,6 +690,14 @@ async function createCompletedFacturaOrderWithMixedEmitters(page) {
   ]);
 
   await expect(page).toHaveURL(/page=wc-orders&action=edit&id=\d+/, { timeout: 20_000 });
+  await page.locator('#order_status').selectOption('wc-completed');
+  await expect(page.locator('#order_status')).toHaveValue('wc-completed');
+  const updateOrderButton = page.getByRole('button', { name: /^Update$/i }).first();
+  await expect(updateOrderButton).toBeVisible();
+  await Promise.all([
+    page.waitForLoadState('domcontentloaded'),
+    updateOrderButton.click(),
+  ]);
   await expect(page.locator('#order_status')).toHaveValue('wc-completed');
   await expect(page.locator('#fe_woo_require_factura')).toBeChecked();
   for (const addedProduct of addedProducts) {
