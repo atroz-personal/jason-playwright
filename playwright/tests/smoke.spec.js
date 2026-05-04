@@ -301,6 +301,21 @@ async function createProductWithFacturaEmitter(page, { productName, regularPrice
   await regularPriceField.fill(regularPrice);
   await expect(regularPriceField).toHaveValue(regularPrice);
 
+  const taxClassField = page.locator('select[name="_tax_class"], #_tax_class').first();
+  if (await taxClassField.isVisible().catch(() => false)) {
+    const costaRicaIvaOption = await taxClassField.locator('option').evaluateAll((options) => {
+      const match = options.find((option) => /Costa Rica IVA/i.test(option.textContent || ''));
+      return match ? match.value : '';
+    });
+
+    if (!costaRicaIvaOption) {
+      throw new Error('Could not find the "Costa Rica IVA" tax class option while creating the product.');
+    }
+
+    await taxClassField.selectOption(costaRicaIvaOption);
+    await expect(taxClassField).toHaveValue(costaRicaIvaOption);
+  }
+
   const productEmitterField = page.locator('#fe_woo_emisor_id').first();
   await expect(productEmitterField).toBeVisible({ timeout: 15_000 });
   await expect
