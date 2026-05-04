@@ -1060,7 +1060,7 @@ test('add Costa Rica IVA tax class and rate from WooCommerce settings', async ({
 
 // Crea un lote de productos con precio y emisor FE aleatorio para poblar el catálogo del entorno de prueba.
 test('add product from wp-admin', async ({ page }, testInfo) => {
-  test.setTimeout(120000);
+  test.setTimeout(90000);
 
   const emitters = await ensureMinimumFacturaElectronicaEmitters(page, 3);
   const productCount = Math.floor(Math.random() * 3) + 5;
@@ -1103,7 +1103,7 @@ test('add completed order with factura electronica from wp-admin', async ({ page
 
 // Ejecuta FE sobre una orden normal y deja evidencia del estado que reporta el metabox en la orden.
 test('execute factura electronica from order status box', async ({ page }, testInfo) => {
-  test.setTimeout(180000);
+  test.setTimeout(120000);
 
   await createCompletedFacturaOrder(page, { minItemCount: 1, maxItemCount: 10 });
   const facturaStatusBox = await executeFacturaOnCurrentOrder(page);
@@ -1127,7 +1127,7 @@ test('execute factura electronica from order status box', async ({ page }, testI
 
 // Fuerza una orden con productos ligados a emisor default y no-default para revisar el comportamiento mixto.
 test('execute factura electronica with default and non-default emitters', async ({ page }, testInfo) => {
-  test.setTimeout(180000);
+  test.setTimeout(120000);
 
   const orderInfo = await createCompletedFacturaOrderWithMixedEmitters(page);
 
@@ -1173,7 +1173,7 @@ test('execute factura electronica with default and non-default emitters', async 
 
 // Reutiliza una orden completada con FE ya generada y valida que todavía podamos moverla a cancelada.
 test('cancel a completed order with generated factura electronica', async ({ page }, testInfo) => {
-  test.setTimeout(120000);
+  test.setTimeout(90000);
 
   await prepareCancelledOrderWithGeneratedFactura(page);
 
@@ -1187,7 +1187,7 @@ test('cancel a completed order with generated factura electronica', async ({ pag
 
 // Toma una orden cancelada con FE generada y dispara una nota de crédito manual desde el metabox de facturas.
 test('generate credit note for cancelled order with generated factura electronica', async ({ page }, testInfo) => {
-  test.setTimeout(180000);
+  test.setTimeout(120000);
   const creditNoteReason = 'Generación de NC por pruebas smoke';
 
   const facturaStatusBox = await prepareCancelledOrderWithGeneratedFactura(page);
