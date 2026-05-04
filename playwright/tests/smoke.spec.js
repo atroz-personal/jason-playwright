@@ -427,6 +427,27 @@ async function addExistingProductToOrder(page, productName, quantity) {
   return addedProductName;
 }
 
+// Fuerza el recálculo de la orden para que WooCommerce agregue impuestos y confirma el prompt nativo.
+async function recalculateOrderTotals(page) {
+  const orderItemsBox = page.locator('#woocommerce-order-items');
+  await expect(orderItemsBox).toBeVisible({ timeout: 15_000 });
+
+  const recalculateButton = orderItemsBox
+    .locator('button, a, input[type="button"], input[type="submit"]')
+    .filter({ hasText: /Recalculate|Recalcular/i })
+    .first();
+  await expect(recalculateButton).toBeVisible({ timeout: 15_000 });
+
+  const dialogPromise = page.waitForEvent('dialog', { timeout: 15_000 });
+  await recalculateButton.click();
+
+  const dialog = await dialogPromise;
+  await dialog.accept();
+
+  await page.waitForLoadState('networkidle');
+  await expect(orderItemsBox).toBeVisible({ timeout: 15_000 });
+}
+
 // Completa ubicación FE con una combinación válida tomada de las opciones ya cargadas por el plugin.
 async function fillFacturaElectronicaLocation(page) {
   const provinciaField = page.locator('#fe_woo_provincia').first();
@@ -558,6 +579,8 @@ async function createCompletedFacturaOrder(page, options = {}) {
     addedProducts.push({ name: addedProductName, quantity });
   }
 
+  await recalculateOrderTotals(page);
+
   const createOrderButton = page.getByRole('button', { name: /^Create$/i }).last();
   await expect(createOrderButton).toBeVisible();
   await Promise.all([
@@ -645,6 +668,8 @@ async function createCompletedFacturaOrderWithMixedEmitters(page) {
     const addedProductName = await addExistingProductToOrder(page, productDefinition.productName, quantity);
     addedProducts.push({ name: addedProductName, quantity });
   }
+
+  await recalculateOrderTotals(page);
 
   const createOrderButton = page.getByRole('button', { name: /^Create$/i }).last();
   await expect(createOrderButton).toBeVisible();
