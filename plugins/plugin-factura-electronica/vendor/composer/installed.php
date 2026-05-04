@@ -1,13 +1,13 @@
 <?php return array(
     'root' => array(
         'name' => 'fe-woo/hacienda-integration',
-        'pretty_version' => 'dev-master',
-        'version' => 'dev-master',
-        'reference' => 'b1d11b0a7697718f28694e953099572e44fe1d35',
+        'pretty_version' => 'dev-main',
+        'version' => 'dev-main',
+        'reference' => '40040704462eb0934f1ce74318d0098c4dd50e5f',
         'type' => 'wordpress-plugin',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
-        'dev' => true,
+        'dev' => false,
     ),
     'versions' => array(
         'dompdf/dompdf' => array(
@@ -20,9 +20,9 @@
             'dev_requirement' => false,
         ),
         'fe-woo/hacienda-integration' => array(
-            'pretty_version' => 'dev-master',
-            'version' => 'dev-master',
-            'reference' => 'b1d11b0a7697718f28694e953099572e44fe1d35',
+            'pretty_version' => 'dev-main',
+            'version' => 'dev-main',
+            'reference' => '40040704462eb0934f1ce74318d0098c4dd50e5f',
             'type' => 'wordpress-plugin',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),

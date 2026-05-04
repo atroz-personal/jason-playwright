@@ -204,20 +204,26 @@ class FE_Woo_Checkout {
             ],
         ], $checkout->get_value('fe_woo_phone') ?: '');
 
-        // Código de actividad económica
+        // Código de actividad económica.
+        // No usamos el atributo 'description' de woocommerce_form_field porque
+        // WC lo renderiza como tooltip absoluto (.woocommerce-input-wrapper
+        // .description) que se rompe visualmente sobre el input. En vez, lo
+        // emitimos como bloque de ayuda estático debajo del campo.
         woocommerce_form_field('fe_woo_activity_code', [
             'type' => 'text',
             'class' => ['form-row-wide', 'fe-woo-field'],
             'label' => __('Código de actividad económica', 'fe-woo'),
             'required' => false,
             'placeholder' => __('Ej: 1234.5', 'fe-woo'),
-            'description' => __('Opcional. Llenar solo si conoces el código exacto de actividad económica registrado para tu empresa en Hacienda. Si lo dejas en blanco, la factura se emite sin este campo.', 'fe-woo'),
             'custom_attributes' => [
                 'pattern' => '\d{4}\.\d{1}',
                 'maxlength' => '6',
                 'title' => __('Formato requerido: 4 dígitos, punto, 1 dígito. Ejemplo: 1234.5', 'fe-woo'),
             ],
         ], $checkout->get_value('fe_woo_activity_code') ?: '');
+        echo '<p class="fe-woo-field-help">'
+            . esc_html__('Opcional. Llenar solo si conoces el código exacto de actividad económica registrado para tu empresa en Hacienda. Si lo dejas en blanco, la factura se emite sin este campo.', 'fe-woo')
+            . '</p>';
 
         // Ubicación (Provincia / Cantón / Distrito + OtrasSenas).
         // Hidratamos desde user_meta si el cliente tiene datos previos guardados,
@@ -253,10 +259,10 @@ class FE_Woo_Checkout {
             </p>
 
             <p class="form-row form-row-wide fe-woo-field">
-                <label for="fe_woo_otras_senas"><?php esc_html_e('Otras Señas', 'fe-woo'); ?> <abbr class="required" title="required">*</abbr></label>
+                <label for="fe_woo_otras_senas"><?php esc_html_e('Otras Señas', 'fe-woo'); ?></label>
                 <textarea name="fe_woo_otras_senas" id="fe_woo_otras_senas" rows="3" maxlength="250"
                           placeholder="<?php esc_attr_e('Ej: 200m sur del parque, casa color blanco', 'fe-woo'); ?>"><?php echo esc_textarea($initial_otras_senas); ?></textarea>
-                <span class="description"><?php esc_html_e('Mínimo 5 caracteres, máximo 250.', 'fe-woo'); ?></span>
+                <span class="description"><?php esc_html_e('Opcional. Si lo dejas vacío, completaremos genéricamente para Hacienda. Máximo 250 caracteres.', 'fe-woo'); ?></span>
             </p>
         </div>
         <?php
@@ -332,15 +338,8 @@ class FE_Woo_Checkout {
             wc_add_notice(__('La combinación de provincia, cantón y distrito no es válida.', 'fe-woo'), 'error');
         }
 
-        $otras_senas = isset($_POST['fe_woo_otras_senas']) ? trim((string) wp_unslash($_POST['fe_woo_otras_senas'])) : '';
-        $otras_len = function_exists('mb_strlen') ? mb_strlen($otras_senas) : strlen($otras_senas);
-        if ($otras_senas === '') {
-            wc_add_notice(__('Por favor ingrese las otras señas para la factura electrónica.', 'fe-woo'), 'error');
-        } elseif ($otras_len < 5) {
-            wc_add_notice(__('Las otras señas deben tener al menos 5 caracteres.', 'fe-woo'), 'error');
-        } elseif ($otras_len > 250) {
-            wc_add_notice(__('Las otras señas no pueden exceder 250 caracteres.', 'fe-woo'), 'error');
-        }
+        // OtrasSenas: opcional. build_receptor concatena RECEPTOR_OTRAS_SENAS_SUFFIX
+        // y trunca a 250, así que vacío o cualquier longitud ≤ 250 es válido.
     }
 
     /**
@@ -545,9 +544,9 @@ class FE_Woo_Checkout {
                     </p>
 
                     <p class="form-field form-field-wide">
-                        <label for="fe_woo_otras_senas"><?php esc_html_e('Otras Señas:', 'fe-woo'); ?> <span class="required">*</span></label>
+                        <label for="fe_woo_otras_senas"><?php esc_html_e('Otras Señas:', 'fe-woo'); ?></label>
                         <textarea name="fe_woo_otras_senas" id="fe_woo_otras_senas" rows="3" maxlength="250" style="width: 100%;" placeholder="<?php esc_attr_e('Ej: 200m sur del parque, casa color blanco', 'fe-woo'); ?>"><?php echo esc_textarea($otras_senas); ?></textarea>
-                        <span class="description"><?php esc_html_e('Mínimo 5 caracteres, máximo 250.', 'fe-woo'); ?></span>
+                        <span class="description"><?php esc_html_e('Opcional. Si lo dejas vacío, completaremos genéricamente para Hacienda. Máximo 250 caracteres.', 'fe-woo'); ?></span>
                     </p>
                 </div>
             </div>

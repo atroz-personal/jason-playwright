@@ -12,7 +12,8 @@
         "phpunit/phpunit": "^9.6"
     },
     "scripts": {
-        "test": "phpunit --colors=always"
+        "test": "phpunit --colors=always",
+        "release-vendor": "@composer install --no-dev --optimize-autoloader"
     },
     "config": {
         "optimize-autoloader": true,

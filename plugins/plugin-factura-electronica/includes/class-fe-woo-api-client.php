@@ -519,12 +519,22 @@ class FE_Woo_API_Client {
             ];
         }
 
-        return [
+        $result = [
             'success' => false,
             'message' => __('Failed to query invoice status', 'fe-woo'),
             'status_code' => $status_code,
             'data' => $response_data,
         ];
+
+        // 404 = clave no recibida por Hacienda. Diferenciado del resto de
+        // errores para que callers (ej. retry de cola) puedan distinguir
+        // "no llegó nunca → safe re-POST" de "Hacienda devolvió error".
+        if ($status_code === 404) {
+            $result['not_found'] = true;
+            $result['message'] = __('Clave no encontrada en Hacienda (no fue recibida).', 'fe-woo');
+        }
+
+        return $result;
     }
 
     /**

@@ -63,6 +63,13 @@ class FE_Woo_Factura_Generator {
     const REFERENCE_OTROS = '99'; // Otros
 
     /**
+     * Sufijo que se concatena SIEMPRE al OtrasSenas del Receptor en el XML.
+     * Garantiza minLength=5 (XSD v4.4 OtrasSenas) cuando el cliente no completó
+     * el campo. Se aplica solo al receptor; el emisor sigue requerido y validado.
+     */
+    const RECEPTOR_OTRAS_SENAS_SUFFIX = '| otras senas especificadas por el emisor';
+
+    /**
      * Prepare emisor data from emisor object
      *
      * @param object $emisor Emisor object from database
@@ -147,6 +154,72 @@ class FE_Woo_Factura_Generator {
                 'xml' => $xml,
                 'document_type' => $document_type,
                 'emisor_id' => $emisor_id,
+            ];
+        } catch (Exception $e) {
+            return [
+                'success' => false,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Reconstruir el XML para una clave existente (sin consumir nuevo consecutivo).
+     *
+     * Usado por el retry del queue cuando una clave previamente generada quedó
+     * "pending" (POST a Hacienda falló o estuvo incierto) y necesitamos volver
+     * a firmar y enviar SIN regenerar el consecutivo. La clave se preserva tal
+     * cual; el cuerpo del XML se reconstruye con los datos actuales de la orden
+     * (que pueden haber sido corregidos por el operador entre tick y tick).
+     *
+     * Diferencias vs generate_from_order:
+     *   - NO llama generate_clave (no consume consecutivo, no registra emisión).
+     *   - NO valida la lista de items vacía (asume el caller ya validó).
+     *
+     * @param WC_Order $order
+     * @param string   $document_type
+     * @param int|null $emisor_id
+     * @param array|null $line_items
+     * @param string   $existing_clave
+     * @param bool     $include_shipping
+     * @return array Mismo shape que generate_from_order: ['success', 'clave', 'xml', ...]
+     */
+    public static function rebuild_xml_for_clave($order, $document_type, $emisor_id, $line_items, $existing_clave, $include_shipping = false) {
+        try {
+            $emisor_data = null;
+            $is_parent_emisor = false;
+            if ($emisor_id) {
+                $emisor = FE_Woo_Emisor_Manager::get_emisor($emisor_id);
+                if (!$emisor) {
+                    throw new Exception("Emisor #{$emisor_id} not found");
+                }
+                $emisor_data = self::prepare_emisor_data($emisor);
+                $is_parent_emisor = !empty($emisor->is_parent);
+            } else {
+                $is_parent_emisor = (FE_Woo_Emisor_Manager::get_parent_emisor() !== null);
+            }
+
+            $apply_exoneracion = $is_parent_emisor;
+            $effective_include_shipping = ($line_items !== null) ? $include_shipping : true;
+
+            $xml = self::build_xml(
+                $order,
+                $existing_clave,
+                $document_type,
+                null,
+                $line_items,
+                $emisor_data,
+                $effective_include_shipping,
+                $apply_exoneracion
+            );
+
+            return [
+                'success' => true,
+                'clave' => $existing_clave,
+                'xml' => $xml,
+                'document_type' => $document_type,
+                'emisor_id' => $emisor_id,
+                'rebuilt' => true,
             ];
         } catch (Exception $e) {
             return [
@@ -259,11 +332,9 @@ class FE_Woo_Factura_Generator {
 
         // The 20-digit consecutive block inside the clave MUST match the
         // <NumeroConsecutivo> element byte-for-byte (Resolución DGT-R-48-2016
-        // art. 4). Previously this was `str_pad($order_id, 20, '0')`, which
-        // produced e.g. `00000000000000015885` while build_xml emitted
-        // NumeroConsecutivo `001000010100000015885` — Hacienda rejects the
-        // mismatch with error -79.
-        $consecutive = self::generate_consecutive($order, $document_type);
+        // art. 4). build_xml() lee el consecutivo de vuelta del clave para
+        // no consumir 2 valores del contador en una sola emisión.
+        $consecutive = self::generate_consecutive($order, $document_type, $emisor_data);
 
         $situation = '1'; // 1 = Normal, 2 = Contingencia, 3 = Sin internet
 
@@ -271,6 +342,26 @@ class FE_Woo_Factura_Generator {
         $security_code = str_pad(wp_rand(1, 99999999), 8, '0', STR_PAD_LEFT); // 8 digits
 
         $clave = $country . $day . $month . $year . $id . $consecutive . $situation . $security_code;
+
+        // Registrar la emisión en el log (orphan tracking).
+        if (self::$last_emitted_numero !== null && class_exists('FE_Woo_Emission_Log')) {
+            FE_Woo_Emission_Log::record_emission(
+                $order->get_id(),
+                $clave,
+                self::$last_emitted_cedula,
+                self::$last_emitted_sucursal,
+                self::$last_emitted_terminal,
+                self::$last_emitted_doctype,
+                self::$last_emitted_numero
+            );
+            // Limpiar el stash para que un eventual reuso del generador no
+            // re-loggee con valores stale.
+            self::$last_emitted_numero = null;
+            self::$last_emitted_cedula = null;
+            self::$last_emitted_sucursal = null;
+            self::$last_emitted_terminal = null;
+            self::$last_emitted_doctype = null;
+        }
 
         return $clave;
     }
@@ -326,20 +417,23 @@ class FE_Woo_Factura_Generator {
             $root->appendChild($xml->createElement('CodigoActividadReceptor', self::normalize_activity_code($receptor_activity_code)));
         }
 
-        // NumeroConsecutivo
-        $consecutive = self::generate_consecutive($order, $document_type);
+        // NumeroConsecutivo — debe coincidir byte-a-byte con la clave
+        // (DGT-R-48-2016 art. 4). Lo extraemos del clave en lugar de
+        // pedir un nuevo valor al contador (eso burnaría 2 consecutivos
+        // por documento).
+        $consecutive = self::extract_consecutivo_from_clave($clave);
         $root->appendChild($xml->createElement('NumeroConsecutivo', $consecutive));
 
-        // FechaEmision must be in Costa Rica local time (UTC-06:00). Sending
-        // UTC (e.g. "T04:47:46+00:00") trips Hacienda's extemporáneo check
-        // because the CR-wall-clock date on the server can land on the
-        // previous day vs our clave's day/month/year. Also, the 5-day window
-        // is evaluated in CR time, so a UTC-encoded "future" timestamp looks
-        // stale. `DateTime::setTimezone` preserves the absolute instant and
-        // reformats with the `-06:00` offset the verifier expects.
-        $cr_date = clone $order->get_date_created();
-        $cr_date->setTimezone(new DateTimeZone('America/Costa_Rica'));
-        $root->appendChild($xml->createElement('FechaEmision', $cr_date->format('c')));
+        // FechaEmision: hora actual del servidor en zona CR. Antes usábamos
+        // $order->get_date_created() pero con cron lag de Pantheon (~1h)
+        // FechaEmision quedaba 60-90 min antes de cuando Hacienda recibía el
+        // XML, disparando el código -53 ("La hora indicada no coincide con la
+        // hora oficial"). Hacienda no rechaza por -53 (sale como observación
+        // en aceptado), pero ensucia la traza. Usar `now()` en CR resuelve
+        // el gap. La conversión via DateTimeZone es independiente del
+        // timezone del servidor (Pantheon corre UTC).
+        $fecha_emision = new DateTime('now', new DateTimeZone('America/Costa_Rica'));
+        $root->appendChild($xml->createElement('FechaEmision', $fecha_emision->format('c')));
 
         // Emisor (Sender - Company)
         $emisor = self::build_emisor($xml, $emisor_data);
@@ -374,11 +468,19 @@ class FE_Woo_Factura_Generator {
     /**
      * Generate consecutive number
      *
-     * @param WC_Order $order WooCommerce order
-     * @param string   $document_type Document type: 'factura', 'tiquete', 'nota_credito', 'nota_debito'
-     * @return string Consecutive number
+     * Toma un valor secuencial atómico del contador `wp_fe_woo_consecutivos`
+     * por (cedula_emisor, sucursal, terminal, document_type). Cada llamada
+     * consume un consecutivo en Hacienda — no es reentrante. Por eso
+     * `build_xml` debe leer el consecutivo del clave (substr 21..40) en lugar
+     * de llamar este método de nuevo.
+     *
+     * @param WC_Order   $order         WooCommerce order (solo para fallback de cédula y logging).
+     * @param string     $document_type Document type: 'factura', 'tiquete', 'nota_credito', 'nota_debito'.
+     * @param array|null $emisor_data   Emisor ['cedula_juridica' => ...]. Si null, usa la config global.
+     * @return string Consecutive number (20 dígitos).
+     * @throws Exception Si el contador falla.
      */
-    private static function generate_consecutive($order, $document_type = 'tiquete') {
+    private static function generate_consecutive($order, $document_type = 'tiquete', $emisor_data = null) {
         // Format: SSSTTTTTDDNNNNNNNNNN (exactly 20 digits per XSD v4.4 NumeroConsecutivoType \d{20,20})
         // SSS     = Sucursal (3 digits)
         // TTTTT   = Terminal/Punto de venta (5 digits) — v4.4 amplió este campo de 3 a 5.
@@ -388,23 +490,34 @@ class FE_Woo_Factura_Generator {
         $sucursal = '001';
         $terminal = '00001';
 
-        // For notes, add timestamp to order ID to ensure uniqueness when multiple notes per order
-        if ($document_type === 'nota_credito' || $document_type === 'nota_debito') {
-            $base_number = $order->get_id() . time();
-            $consecutive = str_pad(substr($base_number, -10), 10, '0', STR_PAD_LEFT);
-        } else {
-            $consecutive = str_pad($order->get_id(), 10, '0', STR_PAD_LEFT);
-        }
-
-        // Get document type code
         $doc_type_map = [
             'factura' => self::DOC_TYPE_FACTURA_ELECTRONICA,
             'nota_debito' => self::DOC_TYPE_NOTA_DEBITO,
             'nota_credito' => self::DOC_TYPE_NOTA_CREDITO,
             'tiquete' => self::DOC_TYPE_TIQUETE_ELECTRONICO,
         ];
-
         $doc_type_code = isset($doc_type_map[$document_type]) ? $doc_type_map[$document_type] : self::DOC_TYPE_TIQUETE_ELECTRONICO;
+
+        // El consecutivo es por emisor: cada cédula tiene su propia secuencia.
+        // Paddeamos a 12 dígitos igual que en `generate_clave` para que el
+        // counter use la misma forma canónica que la clave (y el backfill,
+        // que extrae la cédula de claves históricas, encuentre la misma
+        // fila).
+        $cedula_raw = (!empty($emisor_data['cedula_juridica']))
+            ? $emisor_data['cedula_juridica']
+            : FE_Woo_Hacienda_Config::get_cedula_juridica();
+        $cedula_digits = preg_replace('/\D/', '', (string) $cedula_raw);
+        if ($cedula_digits === '') {
+            throw new Exception('No hay cédula del emisor configurada — no se puede generar consecutivo.');
+        }
+        $cedula = str_pad($cedula_digits, 12, '0', STR_PAD_LEFT);
+
+        if (!class_exists('FE_Woo_Consecutivo_Counter')) {
+            require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-consecutivo-counter.php';
+        }
+
+        $numero = FE_Woo_Consecutivo_Counter::next_value($cedula, $sucursal, $terminal, $doc_type_code);
+        $consecutive = str_pad((string) $numero, 10, '0', STR_PAD_LEFT);
 
         $result = $sucursal . $terminal . $doc_type_code . $consecutive;
 
@@ -416,7 +529,55 @@ class FE_Woo_Factura_Generator {
             ));
         }
 
+        // Stash el consecutivo numérico para que `generate_clave` registre la
+        // emisión en el log una vez tenga la clave completa. Lo guardamos en
+        // estática privada porque generate_clave llama a generate_consecutive
+        // y luego inmediatamente arma la clave — no hay request paralela en
+        // el medio.
+        self::$last_emitted_numero = (int) $numero;
+        self::$last_emitted_cedula = $cedula;
+        self::$last_emitted_sucursal = $sucursal;
+        self::$last_emitted_terminal = $terminal;
+        self::$last_emitted_doctype = $doc_type_code;
+
         return $result;
+    }
+
+    /**
+     * Stash de la última emisión, leído por `generate_clave` para el log.
+     * No es para uso público — es plumbing entre generate_consecutive y
+     * generate_clave dentro del mismo flujo síncrono.
+     */
+    private static $last_emitted_numero = null;
+    private static $last_emitted_cedula = null;
+    private static $last_emitted_sucursal = null;
+    private static $last_emitted_terminal = null;
+    private static $last_emitted_doctype = null;
+
+    /**
+     * Extraer el NumeroConsecutivo (20 dígitos) de una clave de 50 caracteres.
+     * El consecutivo vive en las posiciones 21..40 (después de país+fecha+cedula).
+     *
+     * Esto es crítico para no doble-consumir el contador: `generate_clave`
+     * llama `generate_consecutive` (consume 1) y luego `build_xml` debe
+     * extraer el mismo valor del clave en lugar de pedir otro.
+     *
+     * @param string $clave Clave de 50 caracteres.
+     * @return string Consecutivo de 20 dígitos.
+     */
+    private static function extract_consecutivo_from_clave($clave) {
+        if (!is_string($clave) || strlen($clave) !== 50) {
+            throw new Exception(sprintf(
+                'Clave inválida (esperado 50 chars, recibido %d): "%s"',
+                is_string($clave) ? strlen($clave) : 0,
+                substr((string) $clave, 0, 20)
+            ));
+        }
+        $consecutivo = substr($clave, 21, 20);
+        if (!preg_match('/^\d{20}$/', $consecutivo)) {
+            throw new Exception(sprintf('Consecutivo extraído no numérico: "%s"', $consecutivo));
+        }
+        return $consecutivo;
     }
 
     /**
@@ -474,7 +635,26 @@ class FE_Woo_Factura_Generator {
         if (!empty($emisor_data['codigo_barrio'])) {
             $ubicacion->appendChild($xml->createElement('Barrio', self::zero_pad($emisor_data['codigo_barrio'], 5)));
         }
-        $ubicacion->appendChild($xml->createElement('OtrasSenas', $emisor_data['direccion']));
+
+        // OtrasSenas — XSD v4.4 minLength=5 / maxLength=250. Defense-in-depth:
+        // pre-flight (validate_emisor_fields) ya cubre callers a través de
+        // queue-processor, pero algunos paths (tests, llamadas directas a
+        // generate_from_order sin queue) podrían saltarse el pre-flight.
+        // Throw acá produce un error legible en lugar de un "XML inválido vs
+        // XSD" críptico.
+        $direccion = trim((string) ($emisor_data['direccion'] ?? ''));
+        $direccion_len = function_exists('mb_strlen') ? mb_strlen($direccion) : strlen($direccion);
+        if ($direccion_len < 5) {
+            throw new Exception(sprintf(
+                __('Emisor: la dirección "%s" tiene %d caracteres. Hacienda exige mínimo 5 (XSD v4.4 OtrasSenas). Edítala en FE → Emisores.', 'fe-woo'),
+                $direccion,
+                $direccion_len
+            ));
+        }
+        if ($direccion_len > 250) {
+            $direccion = function_exists('mb_substr') ? mb_substr($direccion, 0, 250) : substr($direccion, 0, 250);
+        }
+        $ubicacion->appendChild($xml->createElement('OtrasSenas', $direccion));
         $emisor->appendChild($ubicacion);
 
         // Telefono
@@ -550,22 +730,22 @@ class FE_Woo_Factura_Generator {
         $identificacion->appendChild($xml->createElement('Numero', preg_replace('/[^0-9A-Za-z]/', '', $id_number)));
         $receptor->appendChild($identificacion);
 
-        // Ubicacion (optional under v4.4) — emit when all 4 fields are present
-        // and the (provincia, canton, distrito) tuple validates against the
-        // CR Locations catalog. Barrio se emite SIEMPRE como "Desconocido" si
-        // no hay meta — fix H-2 v1.15.0 alineado con sistemas productivos
-        // (Coonatramar) que también lo emiten siempre.
+        // Ubicacion (optional under v4.4) — emit when provincia/canton/distrito
+        // are present and validate against the CR Locations catalog. OtrasSenas
+        // siempre incluye el sufijo del sistema (RECEPTOR_OTRAS_SENAS_SUFFIX),
+        // así que el cliente puede dejar vacío sin romper minLength=5 del XSD.
+        // Truncamos a 250 si el concatenado lo supera.
         $r_provincia   = (string) $order->get_meta('_fe_woo_provincia');
         $r_canton      = (string) $order->get_meta('_fe_woo_canton');
         $r_distrito    = (string) $order->get_meta('_fe_woo_distrito');
         $r_otras_senas = (string) $order->get_meta('_fe_woo_otras_senas');
         $r_barrio      = trim((string) $order->get_meta('_fe_woo_barrio'));
 
+        $r_otras_senas_trim = trim($r_otras_senas);
         if (
             $r_provincia !== ''
             && $r_canton !== ''
             && $r_distrito !== ''
-            && $r_otras_senas !== ''
             && class_exists('FE_Woo_CR_Locations')
             && FE_Woo_CR_Locations::validate($r_provincia, $r_canton, $r_distrito)
         ) {
@@ -578,8 +758,9 @@ class FE_Woo_Factura_Generator {
             $barrio_value = $r_barrio !== '' ? $r_barrio : 'Desconocido';
             $ubicacion->appendChild($xml->createElement('Barrio', $barrio_value));
 
-            $otras = function_exists('mb_substr') ? mb_substr($r_otras_senas, 0, 250) : substr($r_otras_senas, 0, 250);
-            $ubicacion->appendChild($xml->createElement('OtrasSenas', $otras));
+            $otras_final = $r_otras_senas_trim . self::RECEPTOR_OTRAS_SENAS_SUFFIX;
+            $otras_final = function_exists('mb_substr') ? mb_substr($otras_final, 0, 250) : substr($otras_final, 0, 250);
+            $ubicacion->appendChild($xml->createElement('OtrasSenas', $otras_final));
 
             $receptor->appendChild($ubicacion);
         }
@@ -1550,5 +1731,250 @@ class FE_Woo_Factura_Generator {
         }
 
         return ['tarifa' => $tarifa, 'tax' => $tax, 'is_taxable' => true];
+    }
+
+    /**
+     * Tarifa numérica esperada para cada CodigoTarifaIVA según XSD v4.4.
+     * Hacienda valida la coherencia código ↔ tarifa y rechaza con error -505
+     * cuando no concuerdan (ej. código '10' Exento exige Tarifa=0).
+     */
+    private static $codigo_iva_to_tarifa = [
+        '01' => 0.0,    // Tarifa 0% (Art. 32 num 1 RLIVA)
+        '02' => 1.0,    // Reducida 1%
+        '03' => 2.0,    // Reducida 2%
+        '04' => 4.0,    // Reducida 4%
+        '05' => 0.0,    // Transitorio 0%
+        '06' => 4.0,    // Transitorio 4%
+        '07' => 8.0,    // Transitorio 8%
+        '08' => 13.0,   // General 13%
+        '09' => 0.5,    // Reducida 0.5%
+        '10' => 0.0,    // Exenta
+        '11' => 0.0,    // 0% sin derecho a crédito
+    ];
+
+    /**
+     * Pre-flight validation antes de consumir un consecutivo.
+     *
+     * Recorre las líneas del documento simulando lo que `build_xml` produciría
+     * y detecta inconsistencias que Hacienda rechazaría:
+     *  - Código de tarifa ↔ Tarifa numérica (error -505).
+     *  - Monto del impuesto ↔ Base × Tarifa / 100 (error -45).
+     *
+     * Detectarlas acá evita quemar un consecutivo en Hacienda por errores de
+     * configuración (tax_class del producto sin rate registrado, mapper FE
+     * apuntando a un código incompatible con la rate aplicada por WC, etc.).
+     *
+     * @param WC_Order               $order
+     * @param string                 $document_type 'tiquete'|'factura'|'nota_credito'|'nota_debito'.
+     * @param array|null             $emisor_data
+     * @param WC_Order_Item[]|null   $line_items    Override de líneas (multi-factura). null = todas.
+     * @param bool                   $apply_exoneracion
+     * @return array ['valid' => bool, 'errors' => string[]]
+     */
+    public static function validate_invoice_data($order, $document_type = 'tiquete', $emisor_data = null, $line_items = null, $apply_exoneracion = true) {
+        $errors = [];
+
+        // Validar campos del emisor antes de consumir un consecutivo.
+        // OtrasSenas en XSD v4.4 exige minLength=5 / maxLength=250 dentro de
+        // Ubicacion (campo requerido del Emisor). Un direccion de 2 chars en
+        // la config dispara "[line 21] OtrasSenas underruns minimum length 5"
+        // y quema consecutivo si llegamos al saveXML+validate.
+        $emisor_errors = self::validate_emisor_fields($emisor_data);
+        $errors = array_merge($errors, $emisor_errors);
+
+        // Validar campos del receptor antes de consumir un consecutivo.
+        // Antes el consecutivo se quemaba si build_receptor lanzaba excepción
+        // o el XSD rechazaba el XML por Tipo/Numero/Nombre vacíos. Eso dejaba
+        // huérfanos benignos en emission_log y avanzaba el counter sin emisión
+        // real. Mover estos checks acá es práctico — el XSD completo es caro
+        // y duplicaría build_xml; los campos del receptor cubren ~95% de los
+        // rechazos reales por datos.
+        // Tiquete no lleva Receptor (XSD), así que sólo validamos para el
+        // resto de tipos de documento.
+        if ($document_type !== 'tiquete') {
+            $receptor_errors = self::validate_receptor_fields($order);
+            $errors = array_merge($errors, $receptor_errors);
+        }
+
+        $exon_data = null;
+        if ($apply_exoneracion && class_exists('FE_Woo_Exoneracion')) {
+            $exon_data = FE_Woo_Exoneracion::get_exoneracion_data($order->get_id());
+            if ($exon_data) {
+                $validation = FE_Woo_Exoneracion::validate_exoneracion($order->get_id());
+                if (!$validation['valid']) {
+                    $exon_data = null;
+                }
+            }
+        }
+
+        $items = $line_items !== null ? $line_items : $order->get_items();
+        $line_idx = 0;
+        foreach ($items as $item) {
+            $line_idx++;
+            $product = $item->get_product();
+            $subtotal = (float) $item->get_total();
+            $item_tax = (float) $item->get_total_tax();
+
+            $tax_info = self::calculate_item_tax_info($item, $product, $subtotal, $item_tax, $exon_data);
+            $tarifa = (float) $tax_info['tarifa'];
+            $tax    = (float) $tax_info['tax'];
+            $codigo = self::resolve_codigo_tarifa_iva($product, $item, $tarifa);
+
+            $product_label = $product ? ($product->get_name() ?: ('producto #' . $item->get_product_id())) : ('item ' . $line_idx);
+
+            // Saltar líneas en cero: items con tax_status='none' o subtotal=0 emiten un
+            // stub <Impuesto> con Monto=0 que Hacienda acepta aunque el código y la
+            // tarifa no sean coherentes entre sí. Validar acá produciría falsos positivos
+            // y bloquearía retries legítimos.
+            if ($subtotal <= 0.001 && abs($tax) <= 0.001) {
+                continue;
+            }
+
+            // Regla 1: código ↔ tarifa numérica.
+            if (isset(self::$codigo_iva_to_tarifa[$codigo])) {
+                $expected_tarifa = self::$codigo_iva_to_tarifa[$codigo];
+                if (abs($tarifa - $expected_tarifa) > 0.001) {
+                    $errors[] = sprintf(
+                        __('Línea %d (%s): código de tarifa IVA "%s" exige Tarifa=%s%%, pero el cálculo da %s%%. Revisa el tax_class del producto y/o el mapeo en FE → Códigos de Tarifa IVA.', 'fe-woo'),
+                        $line_idx,
+                        $product_label,
+                        $codigo,
+                        rtrim(rtrim(number_format($expected_tarifa, 2, '.', ''), '0'), '.'),
+                        rtrim(rtrim(number_format($tarifa, 2, '.', ''), '0'), '.')
+                    );
+                }
+            } else {
+                $errors[] = sprintf(
+                    __('Línea %d (%s): código de tarifa IVA "%s" no está en el catálogo XSD v4.4 (válidos: 01–11).', 'fe-woo'),
+                    $line_idx, $product_label, $codigo
+                );
+            }
+
+            // Regla 2: Monto ≈ Base × Tarifa / 100 (tolerancia 0.01).
+            $expected_monto = $subtotal * $tarifa / 100;
+            if (abs($expected_monto - $tax) > 0.01) {
+                $errors[] = sprintf(
+                    __('Línea %d (%s): Monto del impuesto %s no concuerda con Base %s × Tarifa %s%% = %s. Hacienda rechazaría con error -45.', 'fe-woo'),
+                    $line_idx,
+                    $product_label,
+                    number_format($tax, 5, '.', ''),
+                    number_format($subtotal, 5, '.', ''),
+                    rtrim(rtrim(number_format($tarifa, 2, '.', ''), '0'), '.'),
+                    number_format($expected_monto, 5, '.', '')
+                );
+            }
+        }
+
+        return [
+            'valid' => empty($errors),
+            'errors' => $errors,
+        ];
+    }
+
+    /**
+     * Pre-flight de campos del Emisor (espejo de build_emisor sin construir
+     * XML). Devuelve lista de errores legibles. Vacío = válido.
+     *
+     * Cubre rechazos del EmisorType en XSD v4.4: OtrasSenas con minLength=5 /
+     * maxLength=250. El emisor existe en TODO documento (incluido tiquete),
+     * por lo que se ejecuta sin importar document_type.
+     *
+     * Si $emisor_data es null, el generador hace fallback a
+     * FE_Woo_Hacienda_Config::get_address(); reproducimos ese fallback acá.
+     *
+     * @param array|null $emisor_data
+     * @return string[]
+     */
+    private static function validate_emisor_fields($emisor_data) {
+        $errors = [];
+
+        $direccion = '';
+        if (is_array($emisor_data) && isset($emisor_data['direccion'])) {
+            $direccion = (string) $emisor_data['direccion'];
+        } elseif (class_exists('FE_Woo_Hacienda_Config')) {
+            $direccion = (string) FE_Woo_Hacienda_Config::get_address();
+        }
+
+        $direccion = trim($direccion);
+        $len = function_exists('mb_strlen') ? mb_strlen($direccion) : strlen($direccion);
+
+        if ($len === 0) {
+            $errors[] = __('Emisor: falta Dirección (OtrasSenas). Completa el campo en FE → Emisores (o Configuración del emisor por defecto).', 'fe-woo');
+        } elseif ($len < 5) {
+            $errors[] = sprintf(
+                __('Emisor: la dirección "%s" tiene %d caracteres. Hacienda exige mínimo 5 (XSD v4.4 OtrasSenas). Edítala en FE → Emisores.', 'fe-woo'),
+                $direccion,
+                $len
+            );
+        } elseif ($len > 250) {
+            $errors[] = sprintf(
+                __('Emisor: la dirección tiene %d caracteres. Hacienda exige máximo 250 (XSD v4.4 OtrasSenas). Edítala en FE → Emisores.', 'fe-woo'),
+                $len
+            );
+        }
+
+        return $errors;
+    }
+
+    /**
+     * Pre-flight de campos del Receptor (espejo de build_receptor sin construir
+     * XML). Devuelve lista de errores legibles. Vacío = válido.
+     *
+     * Cubre los rechazos típicos del XSD v4.4 ReceptorType: Tipo en enum,
+     * Numero presente, Nombre derivable (meta o billing fallback). No reproduce
+     * el XSD completo — es práctico, no perfecto.
+     *
+     * @param WC_Order $order
+     * @return string[]
+     */
+    private static function validate_receptor_fields($order) {
+        $errors = [];
+
+        // Tipo de identificación.
+        $id_type = (string) $order->get_meta('_fe_woo_id_type');
+        $valid_id_types = ['01', '02', '03', '04', '05', '06'];
+        if ($id_type === '') {
+            $errors[] = __('Receptor: falta Tipo de Identificación. Completa el campo "Tipo" en la sección Factura Electrónica del pedido.', 'fe-woo');
+        } elseif (!in_array($id_type, $valid_id_types, true)) {
+            $errors[] = sprintf(
+                __('Receptor: Tipo de Identificación "%s" inválido. Valores aceptados por Hacienda: %s.', 'fe-woo'),
+                $id_type,
+                implode(', ', $valid_id_types)
+            );
+        }
+
+        // Número de identificación.
+        $id_number = (string) $order->get_meta('_fe_woo_id_number');
+        $id_number_clean = preg_replace('/[^0-9A-Za-z]/', '', $id_number);
+        if ($id_number_clean === '') {
+            $errors[] = __('Receptor: falta Número de Identificación. Completa el campo "Número" en la sección Factura Electrónica del pedido.', 'fe-woo');
+        }
+
+        // Nombre — espejo de la lógica fallback de build_receptor: meta primario,
+        // legacy `_fe_woo_name`, billing first+last, billing company. Si todos
+        // vienen vacíos, build_receptor lanzaría excepción y quemaría el
+        // consecutivo.
+        $full_name = trim((string) $order->get_meta('_fe_woo_full_name'));
+        if ($full_name === '') {
+            $full_name = trim((string) $order->get_meta('_fe_woo_name'));
+        }
+        if ($full_name === '') {
+            $billing_name = trim($order->get_billing_first_name() . ' ' . $order->get_billing_last_name());
+            $billing_company = trim((string) $order->get_billing_company());
+            if ($billing_company !== '' || $billing_name !== '') {
+                $full_name = $billing_company !== '' ? $billing_company : $billing_name;
+            }
+        }
+        if ($full_name === '') {
+            $errors[] = __('Receptor: falta Nombre/Razón Social. Completa "Nombre Completo o Razón Social" en la sección Factura Electrónica o los datos de facturación del cliente.', 'fe-woo');
+        }
+
+        // OtrasSenas: build_receptor concatena siempre RECEPTOR_OTRAS_SENAS_SUFFIX
+        // y trunca a 250, así que el campo del cliente puede ser vacío o de
+        // cualquier longitud sin riesgo de violar el XSD. No hay nada que validar
+        // aquí. La coherencia geo (provincia/canton/distrito) se asegura en
+        // save_ubicacion_meta y en la condición de emisión de build_receptor.
+
+        return $errors;
     }
 }

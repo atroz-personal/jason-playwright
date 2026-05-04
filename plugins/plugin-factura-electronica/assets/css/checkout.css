@@ -63,6 +63,19 @@
     margin-bottom: 15px;
 }
 
+/* Bloque de ayuda estático bajo un campo (reemplaza al tooltip
+   .description que WC posiciona absoluto y rompe visualmente). */
+.fe-woo-field-help {
+    margin: -8px 0 15px;
+    padding: 0;
+    color: #666;
+    font-size: 12px;
+    line-height: 1.4;
+    font-weight: normal;
+    background: transparent;
+    border: 0;
+}
+
 .fe-woo-field label,
 .fe-woo-factura-section .form-row label {
     font-weight: 500;

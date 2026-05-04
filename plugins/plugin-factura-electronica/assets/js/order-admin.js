@@ -82,7 +82,39 @@
         initDownloadNotaDocsButton();
         initGenerateNoteButton();
         initReasonCounter();
+        initLockGuard();
     });
+
+    /**
+     * Lock guard: si el meta-box render server-side detectó que la orden tiene
+     * una operación FE en progreso, deshabilita todos los botones FE y
+     * recarga la página cuando expire el lock para reflejar el resultado.
+     *
+     * Refrescos durante una operación en vuelo no pueden disparar una
+     * segunda emisión: el handler AJAX rechaza con "ya hay operación en
+     * proceso" y este guard refuerza la UX para que el operador no insista.
+     */
+    function initLockGuard() {
+        var $box = $('.fe-woo-factura-status-box');
+        if (!$box.length || $box.data('feLocked') !== 1) {
+            return;
+        }
+        var remaining = parseInt($box.data('feLockRemaining'), 10) || 30;
+
+        // Deshabilitar acciones críticas mientras dure el lock.
+        $box.find('.fe-woo-manual-execute, .fe-woo-retry-with-updated-data, .fe-woo-recheck-status, .fe-woo-generate-note')
+            .prop('disabled', true)
+            .css('opacity', 0.5)
+            .attr('title', 'Espera a que termine la operación FE en curso');
+
+        // Reload cuando expire (más un buffer de 2s por si el otro proceso
+        // todavía no terminó de guardar). Cap a 60s aunque el server reporte
+        // más.
+        var reloadIn = Math.min(remaining + 2, 60) * 1000;
+        setTimeout(function () {
+            window.location.reload();
+        }, reloadIn);
+    }
 
     /**
      * Initialize EJECUTAR button
@@ -349,9 +381,25 @@
      * @param {string} type Message type ('success' or 'error')
      */
     function showMessage(message, type) {
-        var messageClass = type === 'success' ? 'notice-success' : 'notice-error';
+        var messageClass;
+        if (type === 'success') {
+            messageClass = 'notice-success';
+        } else if (type === 'info') {
+            messageClass = 'notice-info';
+        } else {
+            messageClass = 'notice-error';
+        }
 
-        var $notice = $('<div class="notice ' + messageClass + ' is-dismissible"><p>' + message + '</p><button type="button" class="notice-dismiss"><span class="screen-reader-text">Descartar este aviso.</span></button></div>');
+        // Escapamos el mensaje y luego convertimos \n a <br> para que los
+        // pre-flight con varios errores ("• ...\n• ...") se rendericen en
+        // varias líneas en lugar de colapsarse a una sola. Sin escape, valores
+        // como direccion del receptor podrían inyectar HTML.
+        var $p = $('<p></p>').text(message);
+        $p.html($p.html().replace(/\n/g, '<br>'));
+
+        var $notice = $('<div class="notice ' + messageClass + ' is-dismissible fe-woo-notice"></div>')
+            .append($p)
+            .append('<button type="button" class="notice-dismiss"><span class="screen-reader-text">Descartar este aviso.</span></button>');
 
         // Remove any existing FE Woo notices first
         $('.wrap .notice.fe-woo-notice').remove();
@@ -370,9 +418,6 @@
             $('h1, h2').first().after($notice);
         }
 
-        // Add custom class for easy identification
-        $notice.addClass('fe-woo-notice');
-
         // Initialize WordPress dismiss button functionality
         $notice.find('.notice-dismiss').on('click', function() {
             $notice.fadeOut(function() {
@@ -380,14 +425,19 @@
             });
         });
 
-        // Auto-dismiss after 8 seconds
-        setTimeout(function() {
-            if ($notice.is(':visible')) {
-                $notice.fadeOut(function() {
-                    $(this).remove();
-                });
-            }
-        }, 8000);
+        // Auto-dismiss para success/info (mensajes informativos breves). Los
+        // 'error' quedan persistentes hasta que el admin haga clic en la X —
+        // los mensajes de pre-flight pueden tener varias viñetas y el admin
+        // necesita tiempo para leerlos y corregir antes de reintentar.
+        if (type !== 'error') {
+            setTimeout(function() {
+                if ($notice.is(':visible')) {
+                    $notice.fadeOut(function() {
+                        $(this).remove();
+                    });
+                }
+            }, 8000);
+        }
 
         // Scroll to top to show message
         $('html, body').animate({

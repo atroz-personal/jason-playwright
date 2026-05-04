@@ -181,6 +181,13 @@ class FE_Woo_Queue_Processor {
             // a estado terminal. El gate previous_status !== effective_status
             // previene duplicados cuando el cron + el polling JS + el botón
             // de re-consulta apuntan al mismo veredicto.
+            // Reflejar el estado terminal en el emission log para que
+            // find-orphans pueda distinguir aceptados, rechazados y los que
+            // quedaron en procesando.
+            if ($effective_status && class_exists('FE_Woo_Emission_Log')) {
+                FE_Woo_Emission_Log::update_status($clave, $effective_status);
+            }
+
             if ($effective_status === 'aceptado' && $previous_status !== 'aceptado') {
                 $order->add_order_note(sprintf(
                     /* translators: 1: tipo de documento (Factura/Tiquete/Nota), 2: clave numérica de Hacienda */
@@ -474,6 +481,31 @@ class FE_Woo_Queue_Processor {
      * @param object $item Queue item
      */
     private static function process_item($item) {
+        // Per-order lock: serializa el cron worker contra mutaciones manuales
+        // (Reintentar / Ejecutar / reexecute_invoice), que ya adquieren el
+        // mismo FE_Woo_Order_Lock. Sin esto, cron y manual pueden correr
+        // concurrentes sobre la misma orden y consumir 2 consecutivos.
+        //
+        // Si el lock está tomado: NO marcamos processing ni consumimos
+        // intento. El item permanece pending y el próximo tick lo intentará
+        // cuando el holder libere. TTL alto (300s) cubre Hacienda timeout +
+        // sign + retries dentro del worker.
+        $lock_acquired = false;
+        if (class_exists('FE_Woo_Order_Lock')) {
+            if (!FE_Woo_Order_Lock::acquire($item->order_id, 'cron_queue', 300)) {
+                $existing = FE_Woo_Order_Lock::inspect($item->order_id);
+                self::log(sprintf(
+                    'process_item: skipping queue item #%d for order #%d — lock held by %s (%ds remaining)',
+                    $item->id,
+                    $item->order_id,
+                    isset($existing['operation']) ? $existing['operation'] : 'unknown',
+                    isset($existing['remaining']) ? $existing['remaining'] : 0
+                ));
+                return;
+            }
+            $lock_acquired = true;
+        }
+
         // Mark as processing
         FE_Woo_Queue::mark_processing($item->id);
 
@@ -538,6 +570,10 @@ class FE_Woo_Queue_Processor {
                         $error_message
                     )
                 );
+            }
+        } finally {
+            if ($lock_acquired && class_exists('FE_Woo_Order_Lock')) {
+                FE_Woo_Order_Lock::release($item->order_id);
             }
         }
     }
@@ -670,36 +706,128 @@ class FE_Woo_Queue_Processor {
                 }
             }
 
-            // Generate factura or tiquete XML with specific emisor and line items
-            $result = FE_Woo_Factura_Generator::generate_from_order($order, $document_type, $emisor_id, $line_items);
-
-            if (!$result['success']) {
-                // If skipped because all items are non-taxable, mark as completed and return
-                if (!empty($result['skipped'])) {
-                    FE_Woo_Queue::mark_completed($item->id, '', '', ['skipped' => true]);
-                    $order->add_order_note(__('No se generó documento electrónico: todos los productos tienen estado de impuesto "ninguno".', 'fe-woo'));
-                    self::log(sprintf('Order #%d skipped - all items have tax_status none', $item->order_id));
-                    return;
-                }
-                throw new Exception($result['error']);
+            // Pre-flight: validar coherencia código-tarifa-monto antes de
+            // consumir un consecutivo del contador. Hacienda guarda los
+            // consecutivos rechazados igual que los aceptados, así que cada
+            // intento fallido nos cuesta uno y deja huella permanente en su
+            // sistema. Detectar los errores de configuración acá evita eso.
+            $emisor_data_for_validation = FE_Woo_Factura_Generator::prepare_emisor_data($emisor);
+            $apply_exon_pre = !empty($emisor->is_parent);
+            $preflight = FE_Woo_Factura_Generator::validate_invoice_data($order, $document_type, $emisor_data_for_validation, $line_items, $apply_exon_pre);
+            if (!$preflight['valid']) {
+                throw new Exception(
+                    __('Pre-flight: el documento sería rechazado por Hacienda. Corrige antes de reintentar:', 'fe-woo')
+                    . "\n• " . implode("\n• ", $preflight['errors'])
+                );
             }
 
-            $clave = $result['clave'];
-            $xml = $result['xml'];
+            // === Recuperación de clave pending de un intento previo ===
+            //
+            // Si la orden tiene `_fe_woo_factura_clave_pending`, significa que un
+            // intento anterior consumió consecutivo y generó la clave, pero falló
+            // antes de confirmar (POST/red/server crash). Antes de regenerar
+            // (= quemar otro consecutivo), preguntamos a Hacienda si recibió la
+            // clave previa:
+            //   - Sí (cualquier estado): no re-POST, procesamos veredicto.
+            //   - 404: clave nunca llegó → safe re-POST con misma clave.
+            //   - Error/timeout: throw para retry siguiente tick (clave preservada).
+            $skip_post = false;
+            $clave = null;
+            $xml = null;
+            $response = null;
+            $pending_clave = (string) $order->get_meta('_fe_woo_factura_clave_pending');
 
-            $xml = self::sign_and_validate($xml, $emisor, $order->get_id(), $clave);
+            if ($pending_clave !== '') {
+                self::log(sprintf(
+                    'process_single_factura: recovering pending clave %s for order #%d',
+                    $pending_clave,
+                    $order->get_id()
+                ));
 
-            // Send to Hacienda using emisor's specific credentials
-            $api_client = new FE_Woo_API_Client();
-            $response = $api_client->send_invoice_with_emisor($xml, $emisor);
+                $api_client_check = new FE_Woo_API_Client();
+                $check = $api_client_check->query_invoice_status($pending_clave);
 
-            if (!$response['success']) {
-                // Include detailed error for connection/authentication failures
-                $error_message = $response['message'] ?? __('Error al enviar factura', 'fe-woo');
-                if (isset($response['error_detail'])) {
-                    $error_message .= ' - ' . $response['error_detail'];
+                if (!empty($check['success'])) {
+                    self::log(sprintf(
+                        'process_single_factura: Hacienda has clave %s — recovering without resend',
+                        $pending_clave
+                    ));
+                    $clave = $pending_clave;
+                    $response = [
+                        'success' => true,
+                        'data' => isset($check['data']) ? $check['data'] : [],
+                    ];
+                    $skip_post = true;
+                } elseif (!empty($check['not_found'])) {
+                    self::log(sprintf(
+                        'process_single_factura: Hacienda 404 for clave %s — rebuilding XML and re-posting',
+                        $pending_clave
+                    ));
+                    $rebuild = FE_Woo_Factura_Generator::rebuild_xml_for_clave(
+                        $order,
+                        $document_type,
+                        $emisor_id,
+                        $line_items,
+                        $pending_clave,
+                        false
+                    );
+                    if (empty($rebuild['success'])) {
+                        throw new Exception('Failed to rebuild XML for pending clave: ' . (isset($rebuild['error']) ? $rebuild['error'] : 'unknown'));
+                    }
+                    $clave = $pending_clave;
+                    $xml = $rebuild['xml'];
+                    // skip_post permanece false → continúa al sign + POST.
+                } else {
+                    throw new Exception(sprintf(
+                        'No se pudo verificar el estado de la clave pending %s en Hacienda: %s',
+                        $pending_clave,
+                        isset($check['message']) ? $check['message'] : 'unknown'
+                    ));
                 }
-                throw new Exception($error_message);
+            }
+
+            // === Flujo normal: generar nueva clave ===
+            if ($clave === null) {
+                // Generate factura or tiquete XML with specific emisor and line items
+                $result = FE_Woo_Factura_Generator::generate_from_order($order, $document_type, $emisor_id, $line_items);
+
+                if (!$result['success']) {
+                    // If skipped because all items are non-taxable, mark as completed and return
+                    if (!empty($result['skipped'])) {
+                        FE_Woo_Queue::mark_completed($item->id, '', '', ['skipped' => true]);
+                        $order->add_order_note(__('No se generó documento electrónico: todos los productos tienen estado de impuesto "ninguno".', 'fe-woo'));
+                        self::log(sprintf('Order #%d skipped - all items have tax_status none', $item->order_id));
+                        return;
+                    }
+                    throw new Exception($result['error']);
+                }
+
+                $clave = $result['clave'];
+                $xml = $result['xml'];
+
+                // Persistir pending ANTES de sign+POST. Si algo falla entre acá
+                // y el promote-a-confirmado, el siguiente tick recuperará desde
+                // este meta vía la rama de "Recuperación" arriba.
+                $order->update_meta_data('_fe_woo_factura_clave_pending', $clave);
+                $order->save();
+            }
+
+            // === Sign + POST (skip si recovery vía Hacienda exitoso) ===
+            if (!$skip_post) {
+                $xml = self::sign_and_validate($xml, $emisor, $order->get_id(), $clave);
+
+                // Send to Hacienda using emisor's specific credentials
+                $api_client = new FE_Woo_API_Client();
+                $response = $api_client->send_invoice_with_emisor($xml, $emisor);
+
+                if (!$response['success']) {
+                    // Include detailed error for connection/authentication failures
+                    $error_message = $response['message'] ?? __('Error al enviar factura', 'fe-woo');
+                    if (isset($response['error_detail'])) {
+                        $error_message .= ' - ' . $response['error_detail'];
+                    }
+                    throw new Exception($error_message);
+                }
             }
 
             // Do NOT mark as completed yet. The queue item stays in
@@ -707,10 +835,13 @@ class FE_Woo_Queue_Processor {
             // aceptado is considered success. Rejected / procesando /
             // recibido all get their own handling further down.
 
-            // Save documents to filesystem
-            $xml_result = FE_Woo_Document_Storage::save_xml($item->order_id, $xml, $clave);
-            if ($xml_result['success']) {
-                $order->update_meta_data('_fe_woo_xml_file_path', $xml_result['file_path']);
+            // Save documents to filesystem (skip si recovery vía Hacienda no
+            // re-firmó: el XML del intento previo ya está en disco con su path).
+            if ($xml !== null) {
+                $xml_result = FE_Woo_Document_Storage::save_xml($item->order_id, $xml, $clave);
+                if ($xml_result['success']) {
+                    $order->update_meta_data('_fe_woo_xml_file_path', $xml_result['file_path']);
+                }
             }
 
             // Save Hacienda response as JSON (for reference)
@@ -757,9 +888,18 @@ class FE_Woo_Queue_Processor {
             // "aceptado"/"rechazado" con "procesando". Reload desde DB antes de chequear.
             $order->update_meta_data('_fe_woo_document_type', $document_type);
             $order->update_meta_data('_fe_woo_factura_clave', $clave);
-            $order->update_meta_data('_fe_woo_factura_xml', $xml);
+            // En el path de recovery vía Hacienda (skip_post + clave ya recibida),
+            // $xml es null porque no rebuild ni re-firmamos. Conservamos el XML
+            // previamente persistido (si existe) en lugar de pisarlo con null.
+            if ($xml !== null) {
+                $order->update_meta_data('_fe_woo_factura_xml', $xml);
+            }
             $order->update_meta_data('_fe_woo_factura_status', 'sent');
             $order->update_meta_data('_fe_woo_factura_sent_date', current_time('mysql'));
+            // Promover pending → confirmed: la clave ya fue recibida por Hacienda
+            // (sea via POST exitoso o recovery). Borrar el meta pending evita que
+            // el próximo tick re-intente recovery sobre una clave ya confirmada.
+            $order->delete_meta_data('_fe_woo_factura_clave_pending');
             $order->save();
 
             // Now read fresh — this sees whatever the poll wrote.
@@ -1080,6 +1220,19 @@ class FE_Woo_Queue_Processor {
                 ));
 
                 $include_shipping = !empty($factura_data['include_shipping']);
+
+                // Pre-flight: validar coherencia código-tarifa-monto antes de
+                // consumir un consecutivo (ver explicación en single-factura).
+                $emisor_data_for_validation = FE_Woo_Factura_Generator::prepare_emisor_data($emisor);
+                $apply_exon_pre_mf = !empty($emisor->is_parent);
+                $preflight = FE_Woo_Factura_Generator::validate_invoice_data($order, $document_type, $emisor_data_for_validation, $line_items, $apply_exon_pre_mf);
+                if (!$preflight['valid']) {
+                    throw new Exception(sprintf(
+                        __('Pre-flight (factura %d emisor %s): el documento sería rechazado por Hacienda. Corrige antes de reintentar:', 'fe-woo'),
+                        $index + 1, $emisor->nombre_legal
+                    ) . "\n• " . implode("\n• ", $preflight['errors']));
+                }
+
                 $result = FE_Woo_Factura_Generator::generate_from_order($order, $document_type, $emisor_id, $line_items, $include_shipping);
 
                 if (!$result['success']) {
@@ -1337,7 +1490,44 @@ class FE_Woo_Queue_Processor {
      * @param bool $force Force regeneration even if invoice already exists
      * @return array Result with success boolean and message
      */
-    public static function process_order_immediately($order_id, $force = false) {
+    public static function process_order_immediately($order_id, $force = false, $skip_lock = false) {
+        // Lock defensivo: serializa mutaciones concurrentes sobre la misma orden.
+        //
+        // Callers que ya adquirieron el lock (ajax_retry_with_updated_data,
+        // ajax_manual_execute_factura) deben pasar $skip_lock=true para evitar
+        // un acquire redundante que fallaría con UNIQUE KEY violation.
+        //
+        // Callers sin lock (CLI directos, código interno) caen en el camino
+        // por defecto: si la orden ya está bloqueada, RECHAZAMOS — no
+        // proceder asumiendo que el caller "sabe lo que hace" porque eso
+        // permite concurrencia silenciosa y comprobantes huérfanos.
+        $owns_lock = false;
+        if (!$skip_lock && class_exists('FE_Woo_Order_Lock')) {
+            if (!FE_Woo_Order_Lock::acquire($order_id, $force ? 'reexecute' : 'process_immediate', 180)) {
+                $existing = FE_Woo_Order_Lock::inspect($order_id);
+                return [
+                    'success' => false,
+                    'message' => sprintf(
+                        __('Orden #%d ya tiene una operación FE en proceso (%s, %ds restantes). Espera o intenta de nuevo en unos segundos.', 'fe-woo'),
+                        $order_id,
+                        $existing['operation'] ?? 'unknown',
+                        $existing['remaining'] ?? 0
+                    ),
+                ];
+            }
+            $owns_lock = true;
+        }
+
+        try {
+            return self::process_order_immediately_inner($order_id, $force);
+        } finally {
+            if ($owns_lock && class_exists('FE_Woo_Order_Lock')) {
+                FE_Woo_Order_Lock::release($order_id);
+            }
+        }
+    }
+
+    private static function process_order_immediately_inner($order_id, $force = false) {
         // Check if processing is paused
         if (FE_Woo_Hacienda_Config::is_processing_paused()) {
             return [
@@ -1378,6 +1568,14 @@ class FE_Woo_Queue_Processor {
         if ($force && !empty($existing_clave)) {
             self::log(sprintf('Forcing regeneration for order #%d (previous clave: %s)', $order_id, $existing_clave));
             self::clear_invoice_data($order_id);
+            // clear_invoice_data() borra meta usando su propia instancia $order
+            // y la persiste. Nuestra $order de arriba quedó stale: aún tiene
+            // los meta_id viejos en memoria, y un update_meta_data + save()
+            // posterior haría UPDATE WHERE meta_id = X — pero ese row ya no
+            // existe, así que afecta 0 filas y la nueva clave se pierde
+            // silenciosamente (verificado empíricamente en orden 16176 dev).
+            // Recargar es la única forma segura tras una mutación lateral.
+            $order = wc_get_order($order_id);
         }
 
         // Remove from queue if exists
@@ -1456,6 +1654,19 @@ class FE_Woo_Queue_Processor {
                     $order->update_meta_data('_fe_woo_exoneracion_status', FE_Woo_Exoneracion::STATUS_VALID);
                     $order->save();
                 }
+            }
+
+            // Pre-flight: validar coherencia código-tarifa-monto antes de
+            // consumir un consecutivo (ver explicación en single-factura cron).
+            $emisor_data_for_validation = FE_Woo_Factura_Generator::prepare_emisor_data($emisor);
+            $apply_exon_pre_imm = !empty($emisor->is_parent);
+            $preflight = FE_Woo_Factura_Generator::validate_invoice_data($order, $document_type, $emisor_data_for_validation, $line_items, $apply_exon_pre_imm);
+            if (!$preflight['valid']) {
+                return [
+                    'success' => false,
+                    'message' => __('Pre-flight: el documento sería rechazado por Hacienda. Corrige antes de reintentar:', 'fe-woo')
+                        . "\n• " . implode("\n• ", $preflight['errors']),
+                ];
             }
 
             // Generate factura or tiquete XML with specific emisor and line items
@@ -1729,6 +1940,7 @@ class FE_Woo_Queue_Processor {
         // Clear all invoice-related meta
         $meta_keys = [
             '_fe_woo_factura_clave',
+            '_fe_woo_factura_clave_pending',
             '_fe_woo_factura_xml',
             '_fe_woo_factura_status',
             '_fe_woo_factura_sent_date',

@@ -676,7 +676,13 @@ class FE_Woo_Queue {
 
         global $wpdb;
         $table_name = $wpdb->prefix . self::$table_name;
-        $max_attempts = 5;
+        // Match schema default (3 attempts). Antes estaba hardcoded en 5,
+        // por lo que ningún item realmente fallido (max 3 intentos) era
+        // contado y el email diario al admin nunca se disparaba aunque la
+        // cola tuviera items varados. Si en el futuro se cambia el schema
+        // default, actualizar este valor o migrar a per-row
+        // `attempts >= max_attempts`.
+        $max_attempts = 3;
         $failed_permanent = (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM $table_name WHERE status = %s AND attempts >= %d",
             self::STATUS_FAILED,
@@ -698,7 +704,7 @@ class FE_Woo_Queue {
                         $body .= "- $recovered items recuperados de estado 'processing' (>10 min) → reagendados.\n";
                     }
                     if ($failed_permanent > 0) {
-                        $body .= "- $failed_permanent items en 'failed' con $max_attempts+ intentos (no se reintentarán automáticamente).\n";
+                        $body .= "- $failed_permanent items en 'failed' con $max_attempts+ intentos (no se reintentarán automáticamente). Usa `wp fe-woo unblock_failed` para reactivar transitorios.\n";
                     }
                     $body .= "\nRevisa: " . admin_url('admin.php?page=wc-settings&tab=fe') . "\n";
                     wp_mail($admin_email, $subject, $body);

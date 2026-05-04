@@ -3,7 +3,7 @@
  * Plugin Name: Factura Electronica Para WooCommerce
  * Plugin URI: https://example.com
  * Description: Connecta las ordenes de Woo con Factura Electronica Costa Rica
- * Version: 1.21.0
+ * Version: 1.28.0
  * Author: Jason Acuna
  * Author URI: https://example.com
  * Text Domain: fe-woo
@@ -22,7 +22,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants.
-define('FE_WOO_VERSION', '1.21.0');
+define('FE_WOO_VERSION', '1.28.0');
 define('FE_WOO_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('FE_WOO_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('FE_WOO_PLUGIN_BASENAME', plugin_basename(__FILE__));
@@ -123,6 +123,9 @@ function fe_woo_init() {
 
     // Load queue management classes
     require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-queue.php';
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-consecutivo-counter.php';
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-order-lock.php';
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-emission-log.php';
     require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-factura-generator.php';
     require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-xml-validator.php';
     require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-xml-signer.php';
@@ -245,6 +248,32 @@ function fe_woo_check_version() {
         require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-tax-codigo-mapper.php';
         FE_Woo_Tax_Codigo_Mapper::create_table();
 
+        // Create consecutivo counter table + backfill from existing orders.
+        // El backfill solo corre cuando subimos a la versión que introdujo el
+        // contador (1.22.0); a partir de ahí queda idempotente vía
+        // `GREATEST(next_value, VALUES(next_value))`.
+        require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-consecutivo-counter.php';
+        FE_Woo_Consecutivo_Counter::create_table();
+        if (version_compare($current_version, '1.22.0', '<')) {
+            $backfill = FE_Woo_Consecutivo_Counter::backfill_from_orders();
+            if (function_exists('wc_get_logger')) {
+                wc_get_logger()->info(
+                    sprintf('Consecutivo backfill: %d grupos, %d órdenes escaneadas, %d errores',
+                        $backfill['groups'], $backfill['orders_scanned'], count($backfill['errors'])),
+                    ['source' => 'fe-woo-consecutivo']
+                );
+                foreach ($backfill['errors'] as $err) {
+                    wc_get_logger()->error('Consecutivo backfill error: ' . $err, ['source' => 'fe-woo-consecutivo']);
+                }
+            }
+        }
+
+        // Tablas de mitigaciones v1.23.0: lock atómico por orden + emission log.
+        require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-order-lock.php';
+        require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-emission-log.php';
+        FE_Woo_Order_Lock::create_table();
+        FE_Woo_Emission_Log::create_table();
+
         // Ensure additional columns exist in queue table (dbDelta may not add them reliably)
         $table_name = $wpdb->prefix . 'fe_woo_factura_queue';
         $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$table_name}'");
@@ -289,6 +318,17 @@ function fe_woo_activate() {
 
     // Create emisores table
     FE_Woo_Emisor_Manager::create_table();
+
+    // Create consecutivo counter table + backfill on first activation
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-consecutivo-counter.php';
+    FE_Woo_Consecutivo_Counter::create_table();
+    FE_Woo_Consecutivo_Counter::backfill_from_orders();
+
+    // Mitigaciones v1.23.0: lock + emission log
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-order-lock.php';
+    require_once FE_WOO_PLUGIN_DIR . 'includes/class-fe-woo-emission-log.php';
+    FE_Woo_Order_Lock::create_table();
+    FE_Woo_Emission_Log::create_table();
 
     // Flush rewrite rules for My Account endpoint
     FE_Woo_My_Account::flush_rewrite_rules();

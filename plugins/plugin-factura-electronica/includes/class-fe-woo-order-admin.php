@@ -99,8 +99,26 @@ class FE_Woo_Order_Admin {
         // Get notas in queue (pending/processing/retry)
         $queued_notas = FE_Woo_Queue::get_queued_notas_for_order($order_id);
 
+        // Lock status: si hay una operación en progreso, mostramos un banner
+        // y ocultamos los botones de acción. El JS hace polling y recarga
+        // cuando el lock expira.
+        $lock_info = class_exists('FE_Woo_Order_Lock') ? FE_Woo_Order_Lock::inspect($order_id) : null;
         ?>
-        <div class="fe-woo-factura-status-box" data-order-id="<?php echo esc_attr($order_id); ?>">
+        <div class="fe-woo-factura-status-box" data-order-id="<?php echo esc_attr($order_id); ?>" data-fe-locked="<?php echo $lock_info ? '1' : '0'; ?>" data-fe-lock-remaining="<?php echo $lock_info ? (int) $lock_info['remaining'] : 0; ?>">
+            <?php if ($lock_info) : ?>
+                <div class="fe-woo-lock-banner" style="margin-bottom: 12px; padding: 10px 12px; background: #fff8e1; border-left: 3px solid #ff9800; font-size: 12px;">
+                    <strong style="display:block; margin-bottom: 4px;">
+                        <span class="spinner is-active" style="float:none;margin:0 6px 0 0;vertical-align:middle;"></span>
+                        <?php esc_html_e('Operación FE en progreso', 'fe-woo'); ?>
+                    </strong>
+                    <?php printf(
+                        esc_html__('La orden tiene una operación "%1$s" en proceso (max %2$ds restantes). Los botones se desactivan hasta que termine. Esta página se recargará automáticamente.', 'fe-woo'),
+                        esc_html($lock_info['operation']),
+                        (int) $lock_info['remaining']
+                    ); ?>
+                </div>
+            <?php endif; ?>
+
             <?php if (empty($clave)) : ?>
                 <!-- Show queue status if in queue -->
                 <?php if ($queue_item) : ?>
@@ -1207,6 +1225,27 @@ class FE_Woo_Order_Admin {
             wp_send_json_error(['message' => __('ID de orden inválido', 'fe-woo')]);
         }
 
+        // Lock antes de cualquier mutación para serializar concurrencia entre
+        // tabs/refresh. Si la orden ya tiene una operación FE en proceso
+        // (Reintentar / Ejecutar / reexecute), abortamos limpio.
+        if (class_exists('FE_Woo_Order_Lock')) {
+            if (!FE_Woo_Order_Lock::acquire($order_id, 'manual_execute')) {
+                $existing = FE_Woo_Order_Lock::inspect($order_id);
+                wp_send_json_error([
+                    'message' => sprintf(
+                        __('La orden #%d ya tiene una operación FE en proceso (%s). Espera unos segundos y recarga la página.', 'fe-woo'),
+                        $order_id,
+                        $existing['operation'] ?? 'unknown'
+                    ),
+                    'lock_remaining' => $existing['remaining'] ?? 0,
+                ]);
+            }
+            // shutdown hook: garantiza liberación incluso si wp_die corta el script.
+            register_shutdown_function(function () use ($order_id) {
+                FE_Woo_Order_Lock::release($order_id);
+            });
+        }
+
         // Verify order exists and status is completed
         $order = wc_get_order($order_id);
 
@@ -1235,8 +1274,9 @@ class FE_Woo_Order_Admin {
             ]);
         }
 
-        // Process order immediately (this will also remove from queue if exists)
-        $result = FE_Woo_Queue_Processor::process_order_immediately($order_id);
+        // Process order immediately (this will also remove from queue if exists).
+        // skip_lock=true: el lock ya fue adquirido más arriba con FE_Woo_Order_Lock::acquire().
+        $result = FE_Woo_Queue_Processor::process_order_immediately($order_id, false, true);
 
         if ($result['success']) {
             wp_send_json_success([
@@ -1329,6 +1369,24 @@ class FE_Woo_Order_Admin {
             wp_send_json_error(['message' => __('ID de orden inválido', 'fe-woo')]);
         }
 
+        // Lock para serializar Reintentar contra Ejecutar/otro Reintentar.
+        if (class_exists('FE_Woo_Order_Lock')) {
+            if (!FE_Woo_Order_Lock::acquire($order_id, 'retry')) {
+                $existing = FE_Woo_Order_Lock::inspect($order_id);
+                wp_send_json_error([
+                    'message' => sprintf(
+                        __('La orden #%d ya tiene una operación FE en proceso (%s). Espera unos segundos y recarga la página.', 'fe-woo'),
+                        $order_id,
+                        $existing['operation'] ?? 'unknown'
+                    ),
+                    'lock_remaining' => $existing['remaining'] ?? 0,
+                ]);
+            }
+            register_shutdown_function(function () use ($order_id) {
+                FE_Woo_Order_Lock::release($order_id);
+            });
+        }
+
         $order = wc_get_order($order_id);
         if (!$order) {
             wp_send_json_error(['message' => __('Orden no encontrada', 'fe-woo')]);
@@ -1367,7 +1425,8 @@ class FE_Woo_Order_Admin {
         $order->save();
 
         try {
-            $result = FE_Woo_Queue_Processor::process_order_immediately($order_id, true);
+            // skip_lock=true: el lock ya fue adquirido más arriba con FE_Woo_Order_Lock::acquire().
+            $result = FE_Woo_Queue_Processor::process_order_immediately($order_id, true, true);
         } catch (Exception $e) {
             wp_send_json_error(['message' => $e->getMessage()]);
         }

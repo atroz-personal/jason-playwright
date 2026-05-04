@@ -34,6 +34,13 @@ class FE_Woo_Document_Storage {
     private static $base_url = null;
 
     /**
+     * Per-order date path cache (Y/m/d) keyed by order_id.
+     *
+     * @var array<int,string>
+     */
+    private static $order_date_cache = [];
+
+    /**
      * Initialize document storage
      */
     public static function init() {
@@ -74,14 +81,84 @@ class FE_Woo_Document_Storage {
     }
 
     /**
-     * Get directory for a specific order
+     * Get directory for a specific order. Files are organized as
+     * factura-electronica/Y/m/d/order-{id}/ where Y/m/d comes from the order's
+     * creation date, so reads and writes always resolve to the same path.
      *
      * @param int $order_id Order ID
      * @return string Order directory path
      */
     public static function get_order_dir($order_id) {
         $base_dir = self::get_base_dir();
-        return trailingslashit($base_dir) . 'order-' . $order_id;
+        $date_path = self::get_order_date_path($order_id);
+        return trailingslashit($base_dir) . $date_path . '/order-' . $order_id;
+    }
+
+    /**
+     * Legacy flat order directory used before the dated layout was introduced.
+     * Kept for read fallback so existing orders' documents stay downloadable
+     * without migration.
+     *
+     * @param int $order_id Order ID
+     * @return string Legacy order directory path
+     */
+    private static function get_legacy_order_dir($order_id) {
+        return trailingslashit(self::get_base_dir()) . 'order-' . $order_id;
+    }
+
+    /**
+     * Resolve the Y/m/d segment for an order from its creation date. Falls back
+     * to today's date if the order can't be loaded — only matters for orders
+     * that get hard-deleted before their files do.
+     *
+     * @param int $order_id Order ID
+     * @return string Date path in Y/m/d form
+     */
+    private static function get_order_date_path($order_id) {
+        if (isset(self::$order_date_cache[$order_id])) {
+            return self::$order_date_cache[$order_id];
+        }
+
+        $segments = null;
+        if (function_exists('wc_get_order')) {
+            $order = wc_get_order($order_id);
+            if ($order) {
+                $created = $order->get_date_created();
+                if ($created) {
+                    $segments = $created->date('Y/m/d');
+                }
+            }
+        }
+
+        if ($segments === null) {
+            $segments = gmdate('Y/m/d');
+        }
+
+        self::$order_date_cache[$order_id] = $segments;
+        return $segments;
+    }
+
+    /**
+     * Locate a file by name, checking the dated layout first and falling back
+     * to the legacy flat layout. Returns the absolute path or null.
+     *
+     * @param int    $order_id Order ID
+     * @param string $filename Sanitized filename
+     * @return string|null
+     */
+    private static function find_existing_file($order_id, $filename) {
+        $candidates = [
+            trailingslashit(self::get_order_dir($order_id)) . $filename,
+            trailingslashit(self::get_legacy_order_dir($order_id)) . $filename,
+        ];
+
+        foreach ($candidates as $path) {
+            if (file_exists($path)) {
+                return $path;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -240,11 +317,7 @@ class FE_Woo_Document_Storage {
      * @return string|null File path or null if not found
      */
     public static function get_xml_path($order_id, $clave) {
-        $order_dir = self::get_order_dir($order_id);
-        $filename = sanitize_file_name($clave) . '.xml';
-        $file_path = trailingslashit($order_dir) . $filename;
-
-        return file_exists($file_path) ? $file_path : null;
+        return self::find_existing_file($order_id, sanitize_file_name($clave) . '.xml');
     }
 
     /**
@@ -255,11 +328,7 @@ class FE_Woo_Document_Storage {
      * @return string|null File path or null if not found
      */
     public static function get_acuse_path($order_id, $clave) {
-        $order_dir = self::get_order_dir($order_id);
-        $filename = sanitize_file_name($clave) . '_acuse.json';
-        $file_path = trailingslashit($order_dir) . $filename;
-
-        return file_exists($file_path) ? $file_path : null;
+        return self::find_existing_file($order_id, sanitize_file_name($clave) . '_acuse.json');
     }
 
     /**
@@ -270,11 +339,7 @@ class FE_Woo_Document_Storage {
      * @return string|null File path or null if not found
      */
     public static function get_acuse_xml_path($order_id, $clave) {
-        $order_dir = self::get_order_dir($order_id);
-        $filename = 'AHC-' . sanitize_file_name($clave) . '.xml';
-        $file_path = trailingslashit($order_dir) . $filename;
-
-        return file_exists($file_path) ? $file_path : null;
+        return self::find_existing_file($order_id, 'AHC-' . sanitize_file_name($clave) . '.xml');
     }
 
     /**
@@ -325,25 +390,14 @@ class FE_Woo_Document_Storage {
      * @return string|null File path or null if not found
      */
     public static function get_pdf_path($order_id, $clave) {
-        $order_dir = self::get_order_dir($order_id);
+        $sanitized = sanitize_file_name($clave);
 
-        // Check for .pdf first
-        $pdf_filename = sanitize_file_name($clave) . '.pdf';
-        $pdf_path = trailingslashit($order_dir) . $pdf_filename;
-
-        if (file_exists($pdf_path)) {
-            return $pdf_path;
+        $pdf = self::find_existing_file($order_id, $sanitized . '.pdf');
+        if ($pdf !== null) {
+            return $pdf;
         }
 
-        // Check for .html fallback
-        $html_filename = sanitize_file_name($clave) . '.html';
-        $html_path = trailingslashit($order_dir) . $html_filename;
-
-        if (file_exists($html_path)) {
-            return $html_path;
-        }
-
-        return null;
+        return self::find_existing_file($order_id, $sanitized . '.html');
     }
 
     /**
@@ -482,22 +536,29 @@ class FE_Woo_Document_Storage {
      * @return bool True on success
      */
     public static function delete_order_documents($order_id) {
-        $order_dir = self::get_order_dir($order_id);
+        $dirs = [
+            self::get_order_dir($order_id),
+            self::get_legacy_order_dir($order_id),
+        ];
 
-        if (!file_exists($order_dir)) {
-            return true; // Nothing to delete
-        }
-
-        // Delete all files in directory
-        $files = glob($order_dir . '/*');
-        foreach ($files as $file) {
-            if (is_file($file)) {
-                unlink($file);
+        foreach ($dirs as $dir) {
+            if (!file_exists($dir)) {
+                continue;
             }
+
+            $files = glob($dir . '/*');
+            if (is_array($files)) {
+                foreach ($files as $file) {
+                    if (is_file($file)) {
+                        unlink($file);
+                    }
+                }
+            }
+
+            @rmdir($dir);
         }
 
-        // Delete directory
-        return rmdir($order_dir);
+        return true;
     }
 
     /**

@@ -295,6 +295,37 @@ For issues or questions:
 
 This plugin is part of a WordPress/WooCommerce integration project.
 
+## Releasing
+
+The plugin commits its `vendor/` directory so that consumers (e.g. Bedrock
+projects) can install it as a Composer dist `zip` without having to run
+`composer install` inside the plugin. The committed `vendor/` MUST contain
+runtime dependencies only — dev packages (PHPUnit and friends) are excluded
+via `.gitignore` and would otherwise leave the autoload pointing at files
+that don't exist on disk.
+
+Before tagging a new version, always regenerate the autoload without dev:
+
+```bash
+composer release-vendor   # alias for: composer install --no-dev --optimize-autoloader
+git add vendor/ composer.json composer.lock fe_woo.php CHANGELOG.md
+git commit -m "VERSION X.Y.Z"
+git tag vX.Y.Z
+git push origin main --tags
+```
+
+After pushing the tag, bump the consumer (Bedrock root):
+
+```bash
+composer update fe-woo/hacienda-integration --with-dependencies
+```
+
+> **Why this matters:** v1.26.0 shipped with a `vendor/composer/autoload_*.php`
+> generated with `--dev`. Because `.gitignore` excludes the dev package
+> directories, every consumer installation crashed at bootstrap with
+> `Failed opening required '.../myclabs/deep-copy/.../deep_copy.php'`. The
+> `release-vendor` script exists to prevent that regression.
+
 ## Credits
 
 Developed for integration with Costa Rica's Ministerio de Hacienda electronic invoicing system (ATV).

@@ -614,8 +614,19 @@ class FE_Woo_Emisor_Manager {
             $errors[] = __('El código de distrito es requerido.', 'fe-woo');
         }
 
+        // Dirección — XSD v4.4 OtrasSenas: minLength=5, maxLength=250.
+        // Bloquear acá evita guardar un emisor que después rompe el XSD y
+        // quema un consecutivo en Hacienda en la primera emisión.
         if (empty($data['direccion'])) {
             $errors[] = __('La dirección es requerida.', 'fe-woo');
+        } else {
+            $direccion_trim = trim((string) $data['direccion']);
+            $direccion_len = function_exists('mb_strlen') ? mb_strlen($direccion_trim) : strlen($direccion_trim);
+            if ($direccion_len < 5) {
+                $errors[] = __('La dirección debe tener al menos 5 caracteres (Hacienda XSD v4.4 OtrasSenas).', 'fe-woo');
+            } elseif ($direccion_len > 250) {
+                $errors[] = __('La dirección no puede exceder 250 caracteres (Hacienda XSD v4.4 OtrasSenas).', 'fe-woo');
+            }
         }
 
         // Validate email format if provided
