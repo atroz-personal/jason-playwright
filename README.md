@@ -2,7 +2,7 @@
 
 Stack listo para levantar una instancia de WordPress usando la imagen base `wordpress:6.9.4-php8.4-fpm`, con:
 
-- WooCommerce instalado y activado automaticamente.
+- WooCommerce instalado con CRC como moneda por defecto y activado automaticamente.
 - Soporte para uploads mayores a `32MB` configurado en PHP y Nginx.
 
 ## Archivos
